@@ -1,16 +1,21 @@
 // Fixtures modelled on ORD-39HY7JN — "2027-2028 [CAMPION]: Methodist Ladies'
 // College, Perth" — a two-year RENEWAL order with an annual ramp.
 //
-// The existing order below is the real one: same charges, quantities,
-// prices, ramp windows and Year Groups. The subscription and the fresh
-// draftRenewal payload are reconstructed, because only the order itself was
-// captured — they are shaped the way Subskribe returns them (a draft is a
-// single one-year period, priced at catalog, with the tier attributes and
-// Year Groups it defaults to).
+// The existing order and SUB-N7YVJCT are both real: same charges,
+// quantities, prices, ramp windows and Year Groups. The fresh draftRenewal
+// payload is reconstructed, because only the order and the subscription were
+// captured — it is shaped the way Subskribe returns one (a single one-year
+// period, priced at catalog, with the tier attributes and Year Groups it
+// defaults to).
 
-const P1 = 1798714800; // 2027 term start
+const P1 = 1798714800; // 2027 term start — also the subscription's end
 const P2 = 1830250800; // ramp boundary — 2028 term start
 const END = 1861873200; // 2028 term end
+
+// The subscription's own three ramp periods, 2024 through 2026.
+const S0 = 1704020400;
+const S1 = 1735642800;
+const S2 = 1767178800;
 
 const YEAR_OPTIONS = [
   '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13',
@@ -353,13 +358,162 @@ const buildExistingOneYearOrder = () => {
   };
 };
 
+// ==================================================
+// THE REAL SUB-N7YVJCT
+//
+// A three-year ramped subscription running 2024–2026, renewed by
+// ORD-39HY7JN. Two things about it matter to the rebuild:
+//
+//   1. Its charges come back with customFields as an OBJECT keyed by field
+//      id, not as an array like an order's line items.
+//   2. Its final period carries 809 billable seats across 6 charges, while
+//      the renewal order quotes 744 across 4 — the Y11/12 lines were
+//      consolidated (13 + 33 + 68 -> 16 + 43) and the deal was quoted 65
+//      seats down. The rebuild has to reproduce the quote, not the
+//      subscription.
+// ==================================================
+// id, groupId, chargeId, qty, isRamp, list, sell, start, end, years, attrs
+const REAL_CHARGES = [
+  ['c2e268df', '1e5f9e40', 'CHRG-11GV6ZT', 0, false, 35, 35, S0, P1, null, false],
+  ['749db4fd', '2176c4a5', 'CHRG-TJDMJEC', 0, false, 35, 35, S0, P1, null, false],
+  ['65a62813', '23c39776', 'CHRG-9JVC18V', 368, true, 40, 31, S0, S1, '7; 8; 9', false],
+  ['ba38f0a1', '23c39776', 'CHRG-9JVC18V', 354, true, 40, 33.5, S1, S2, '7; 8; 9', false],
+  ['d83544a4', '23c39776', 'CHRG-9JVC18V', 341, true, 40, 36, S2, P1, '7; 8; 9', false],
+  ['186aa252', '2e20cf2c', 'CHRG-THPFQW4', 0, false, 329, 329, S0, P1, null, false],
+  ['2b15afe7', '307486ea', 'CHRG-D832X0M', 0, false, 24, 24, S0, P1, null, false],
+  ['37301cef', '32957c7e', 'CHRG-30CK6GF', 0, false, 12, 12, S0, P1, null, false],
+  ['c8efffdc', '3e6d7a9c', 'CHRG-F38PDEK', 0, false, 329, 329, S2, P1, null, false],
+  ['2fb37e3c', '3f099599', 'CHRG-N9VNCEG', 3, true, 49, 16.75, S1, S2, '7', true],
+  ['32afaef9', '51bfd697', 'CHRG-CK5GH28', 0, false, 40, 40, S0, P1, null, false],
+  ['d454150d', '5e6fe73e', 'CHRG-4638CJJ', 0, false, 12, 12, S0, P1, null, false],
+  ['0a811dfa', '671258bb', 'CHRG-RTC7YRP', 0, false, 25.5, 25.5, S2, P1, null, true],
+  ['1bae23fc', '7e02629d', 'CHRG-49MW1FM', 371, true, 40, 31, S0, S1, '7; 8; 9; 10', false],
+  ['65a7d1d9', '7e02629d', 'CHRG-49MW1FM', 391, true, 40, 33.5, S1, S2, '7; 8; 9; 10', false],
+  ['ebb790a6', '7e02629d', 'CHRG-49MW1FM', 353, true, 40, 36, S2, P1, '7; 8; 9; 10', false],
+  ['2f03ee94', '818bbd8c', 'CHRG-G32RFDZ', 0, false, 49, 49, S2, P1, null, true],
+  ['7c2b15c0', '8b717467', 'CHRG-VN4X8TZ', 5, true, 35, 31, S0, S1, '11; 12', false],
+  ['5ca774ce', '8b717467', 'CHRG-VN4X8TZ', 5, true, 35, 33.5, S1, S2, '11; 12', false],
+  ['5009fbdf', '8b717467', 'CHRG-VN4X8TZ', 13, true, 36, 36, S2, P1, '11; 12', false],
+  ['749383e8', '8e9b4c36', 'CHRG-45NK9MD', 0, false, 12, 12, S2, P1, null, true],
+  ['ada9131f', '92cc6c8b', 'CHRG-WRRNMPT', 27, true, 35, 31, S0, S1, '11; 12', false],
+  ['3c35b777', '92cc6c8b', 'CHRG-WRRNMPT', 36, true, 35, 33.5, S1, S2, '11; 12', false],
+  ['a5670b6e', '92cc6c8b', 'CHRG-WRRNMPT', 33, true, 36, 36, S2, P1, '11; 12', false],
+  ['6198fb9e', '9f0345dd', 'CHRG-CJWFXP8', 18, true, 40, 31, S0, S1, '10', false],
+  ['76d507ec', 'b76bb988', 'CHRG-19PVMEV', 0, false, 24, 24, S0, P1, null, false],
+  ['ca05a831', 'be290c3d', 'CHRG-E2CJ77W', 0, false, 329, 329, S0, P1, null, false],
+  ['f81021d4', 'c0f3dc52', 'CHRG-ZY51B7H', 54, true, 35, 31, S0, S1, '11; 12', false],
+  ['6ffe12a5', 'c0f3dc52', 'CHRG-ZY51B7H', 61, true, 35, 33.5, S1, S2, '11; 12', false],
+  ['cd8e3d01', 'c0f3dc52', 'CHRG-ZY51B7H', 68, true, 36, 36, S2, P1, '11; 12', false],
+  ['207463ec', 'c1d3eb20', 'CHRG-MT1FCH4', 0, false, 49, 49, S2, P1, null, true],
+  ['1983714f', 'cb305abb', 'CHRG-4EME678', 0, false, 40, 40, S0, P1, null, false],
+  ['70d53aef', 'e518adb4', 'CHRG-TNG3CZG', 0, false, 25.5, 25.5, S2, P1, null, true],
+  ['11d27707', 'e5dc61dc', 'CHRG-YDJPWXR', 0, false, 25.5, 25.5, S2, P1, null, true],
+  ['12e04387', 'e76903ff', 'CHRG-GCJ184F', 0, false, 40, 40, S0, P1, null, false],
+  ['268545ea', 'e76c6fb8', 'CHRG-9JVC18V', 1, false, 40, 36, S2, P1, '10', false],
+  ['fc14b1e1', 'f65876e7', 'CHRG-PHFD0FR', 0, false, 35, 35, S0, P1, null, false],
+  ['9029ec20', 'fbf5bf0e', 'CHRG-ZHFTN4X', 3, true, 49, 16.75, S1, S2, '7', true]
+];
+
+// Subscription charges return customFields keyed by field id, not as a list.
+const chargeCustomFields = (years) => ({
+  'CF-B0CZ41JW': { ...notesField(), id: undefined },
+  'CF-4EJ2B59D': { ...yearsField(years), id: undefined }
+});
+
+const buildRealSubscription = () => ({
+  id: 'SUB-N7YVJCT',
+  version: 23,
+  entityId: 'ENT-MNJ0N5D',
+  accountId: 'ACCT-DWK6PGC',
+  state: 'ACTIVE',
+  startDate: S0,
+  endDate: P1,
+  billingCycle: { cycle: 'YEAR', step: 1 },
+  paymentTerm: 'NET14',
+  billingTerm: 'UP_FRONT',
+  autoRenew: false,
+  charges: REAL_CHARGES.map(([id, groupId, chargeId, quantity, isRamp,
+    listUnitPrice, sellUnitPrice, startDate, endDate, years, hasAttributes]) => {
+    const charge = {
+      id,
+      groupId,
+      accountId: 'ACCT-DWK6PGC',
+      chargeId,
+      quantity,
+      isRamp,
+      listUnitPrice,
+      sellUnitPrice,
+      discounts: sellUnitPrice < listUnitPrice
+        ? [{ name: 'default', percent: 1 - (sellUnitPrice / listUnitPrice), discountAmount: null, status: null, discountedPrice: null }]
+        : [],
+      startDate,
+      endDate,
+      customFields: chargeCustomFields(years)
+    };
+    if (hasAttributes) charge.attributeReferences = CORE_INDEPENDENT;
+    return charge;
+  })
+});
+
+// What draftRenewal returns once the plans have been re-versioned: lines on
+// the CURRENT catalog charge ids (the ones ORD-39HY7JN uses), no
+// subscriptionChargeId to link them back, tier attributes defaulted and Year
+// Groups unset. Seat counts carry over from the subscription's final period,
+// which is where the 341/353/13/33 come from.
+//
+// The Y11/12 consolidation means the subscription's CHRG-ZY51B7H (68 seats)
+// has no line here at all.
+const PLAN_SWAP_DRAFT_LINES = [
+  ['PLAN-GHVVWF9', 'CHRG-W9V9GW5', 341, 51.5, true],
+  ['PLAN-GHVVWF9', 'CHRG-PFR72B4', 353, 51.5, true],
+  ['PLAN-DCK63P6', 'CHRG-4KF5RH4', 13, 51.5, true],
+  ['PLAN-DCK63P6', 'CHRG-6T5J1FH', 33, 51.5, true],
+  ['PLAN-99999WD', 'CHRG-MT1FCH4', 0, 49, true],
+  ['PLAN-GHVVWF9', 'CHRG-8XTEG07', 0, 51.5, true],
+  ['PLAN-GHVVWF9', 'CHRG-BWJCB3F', 0, 51.5, true],
+  ['PLAN-GHVVWF9', 'CHRG-W2V950C', 0, 51.5, true],
+  ['PLAN-99999WD', 'CHRG-F38PDEK', 0, 329, false],
+  ['PLAN-99999WD', 'CHRG-RTC7YRP', 0, 25.5, true],
+  ['PLAN-99999WD', 'CHRG-TNG3CZG', 0, 25.5, true],
+  ['PLAN-99999WD', 'CHRG-YDJPWXR', 0, 25.5, true],
+  ['PLAN-99999WD', 'CHRG-45NK9MD', 0, 12, true],
+  ['PLAN-99999WD', 'CHRG-G32RFDZ', 0, 49, true],
+  ['PLAN-DCK63P6', 'CHRG-1TKH0ZG', 0, 51.5, true],
+  ['PLAN-DCK63P6', 'CHRG-EGYVEMW', 0, 51.5, true],
+  ['PLAN-DCK63P6', 'CHRG-K7210X0', 0, 51.5, true]
+];
+
+const buildPlanSwapDraft = ({ startDate = P1, endDate = P2 } = {}) => ({
+  ...buildDraftRenewal({ startDate, endDate }),
+  lineItems: PLAN_SWAP_DRAFT_LINES.map(([planId, chargeId, quantity, price, hasAttributes], index) => {
+    const line = {
+      id: `swapdraft-${String(index + 1).padStart(3, '0')}`,
+      isDryRunItem: false,
+      action: 'RENEWAL',
+      planId,
+      chargeId,
+      quantity,
+      listUnitPrice: price,
+      sellUnitPrice: price,
+      discounts: [],
+      effectiveDate: startDate,
+      endDate,
+      customFields: customFields(null)
+    };
+    if (hasAttributes) line.attributeReferences = CORE_INDEPENDENT;
+    return line;
+  })
+});
+
 module.exports = {
   P1,
   P2,
   END,
   CORE_INDEPENDENT,
   buildSubscription,
+  buildRealSubscription,
   buildDraftRenewal,
+  buildPlanSwapDraft,
   buildExistingTwoYearOrder,
   buildExistingOneYearOrder
 };

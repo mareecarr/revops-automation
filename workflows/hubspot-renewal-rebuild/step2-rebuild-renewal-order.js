@@ -450,7 +450,9 @@ exports.main = async (event, callback) => {
 
     if (renewalCharges.length !== subscriptionCharges.length) {
       const expiredBillable = expiredCharges.filter(c => c.quantity > 0);
-      console.log(`Renewal charges: ${renewalCharges.length} of ${subscriptionCharges.length} (${expiredCharges.length} expired before subscription end${expiredBillable.length ? `, incl. ${expiredBillable.map(c => `${c.chargeId}(qty ${c.quantity})`).join(', ')}` : ''})`);
+      const shownExpired = expiredBillable.slice(0, 4)
+        .map(c => `${c.chargeId}(qty ${c.quantity})`).join(', ');
+      console.log(`Renewal charges: ${renewalCharges.length} of ${subscriptionCharges.length} (${expiredCharges.length} expired before subscription end${expiredBillable.length ? `, incl. ${shownExpired}${expiredBillable.length > 4 ? ` (+${expiredBillable.length - 4})` : ''}` : ''})`);
     }
 
     // ==================================================
@@ -1094,23 +1096,49 @@ exports.main = async (event, callback) => {
     const orphanedBillableCharges = renewalCharges
       .filter(c => !usedSubCharges.has(c.id) && c.quantity > 0);
     if (orphanedBillableCharges.length > 0) {
-      console.error(`WARNING: ${orphanedBillableCharges.length} billable renewal charge(s) not represented: ${orphanedBillableCharges.map(c => `${c.chargeId}(qty ${c.quantity})`).join(', ')}`);
+      const shownOrphans = orphanedBillableCharges.slice(0, 5)
+        .map(c => `${c.chargeId}(qty ${c.quantity})`).join(', ');
+      console.error(`WARNING: ${orphanedBillableCharges.length} billable renewal charge(s) not represented: ${shownOrphans}${orphanedBillableCharges.length > 5 ? ` (+${orphanedBillableCharges.length - 5})` : ''}`);
     }
 
-    // Quantity is checked period by period. Summing the whole order would
-    // let a dropped line in one year hide behind the duplicate quantity of
-    // another, which is exactly the failure this guard exists to catch.
-    const expectedQuantity = renewalCharges.reduce((s, c) => s + (c.quantity || 0), 0);
-    const fullSpanQuantity = mergedLineItems
+    // Nothing may be dropped while rebuilding, and the yardstick for that is
+    // the order being rebuilt — NOT the subscription. A renewal is routinely
+    // quoted at a different seat count from the term it renews: a year group
+    // is dropped, students leave, several lines are consolidated into fewer.
+    // Reproducing that negotiated quote is the whole job, so measuring
+    // against the subscription would refuse every renewal quoted down.
+    //
+    // Checked period by period: summing the whole order would let a line
+    // dropped from one year hide behind the duplicate quantity of another,
+    // which is exactly the failure this guard exists to catch.
+    const subscriptionQuantity = renewalCharges.reduce((s, c) => s + (c.quantity || 0), 0);
+    const quotedFullSpanQuantity = isMultiSegment
+      ? fullSpanPool.reduce((s, i) => s + (i.quantity || 0), 0)
+      : 0;
+    const rebuiltFullSpanQuantity = mergedLineItems
       .filter(i => i.segmentIndex == null)
       .reduce((s, i) => s + (i.quantity || 0), 0);
+
     for (let k = 0; k < segments.length; k++) {
-      const periodQuantity = mergedLineItems
+      const rebuiltQuantity = mergedLineItems
         .filter(i => i.segmentIndex === k)
-        .reduce((s, i) => s + (i.quantity || 0), 0) + fullSpanQuantity;
-      console.log(`Quantity period ${k + 1}: expected=${expectedQuantity} rebuilt=${periodQuantity}`);
-      if (periodQuantity < expectedQuantity) {
-        throw new Error(`Rebuilt quantity ${periodQuantity} in period ${k + 1} is below expected renewal quantity ${expectedQuantity} — line items were dropped`);
+        .reduce((s, i) => s + (i.quantity || 0), 0) + rebuiltFullSpanQuantity;
+      const quotedQuantity = isMultiSegment
+        ? segmentPools[k].reduce((s, i) => s + (i.quantity || 0), 0) + quotedFullSpanQuantity
+        : existingLineItems.reduce((s, i) => s + (i.quantity || 0), 0);
+
+      console.log(`Quantity period ${k + 1}: quoted=${quotedQuantity} rebuilt=${rebuiltQuantity} subscription=${subscriptionQuantity}`);
+
+      if (rebuiltQuantity < quotedQuantity) {
+        throw new Error(`Rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId} — line items were dropped`);
+      }
+
+      // Not a failure: the rebuild matches what was quoted. Surfaced because
+      // a renewal well below the term it renews is worth a human glance
+      // before it goes out, whether it is a deliberate reduction or an
+      // oversight in the order being rebuilt.
+      if (rebuiltQuantity < subscriptionQuantity) {
+        console.error(`NOTE: period ${k + 1} carries ${rebuiltQuantity} seats where the subscription's renewing charges carry ${subscriptionQuantity} (${subscriptionQuantity - rebuiltQuantity} fewer) — this matches ${existingRenewalOrderId}, but check it is intended before sending`);
       }
     }
 

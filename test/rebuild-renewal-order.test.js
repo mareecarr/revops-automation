@@ -279,6 +279,92 @@ test('a billable line outside every ramp period stops the rebuild', async () => 
 });
 
 // ==================================================
+// THE REAL SUB-N7YVJCT — A RENEWAL QUOTED DOWN
+//
+// The subscription's final period carries 809 billable seats; the renewal
+// order quotes 744. Reproducing the quote is the job, so this must build.
+// ==================================================
+const realCase = () => ({
+  subscription: fixtures.buildRealSubscription(),
+  existingOrder: fixtures.buildExistingTwoYearOrder(),
+  draftRenewal: fixtures.buildPlanSwapDraft()
+});
+
+test('a renewal quoted below the subscription still rebuilds', async () => {
+  const { posted, output } = await runStep2(realCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+  assert.strictEqual(posted.lineItems.length, 22);
+
+  const period1 = posted.lineItems
+    .filter(i => i.effectiveDate === P1)
+    .reduce((sum, i) => sum + i.quantity, 0);
+  assert.strictEqual(period1, 744, 'period 1 must match the quote, not the subscription');
+
+  const period2 = posted.lineItems
+    .filter(i => i.effectiveDate === P2)
+    .reduce((sum, i) => sum + i.quantity, 0);
+  assert.strictEqual(period2, 744);
+});
+
+test('quantities come from the quote where it renegotiated the subscription', async () => {
+  const { posted } = await runStep2(realCase());
+
+  // Subscription says 341/353/13/33 for these; the order quotes
+  // 325/360/16/43 and the order wins.
+  const quoted = { 'CHRG-W9V9GW5': 325, 'CHRG-PFR72B4': 360, 'CHRG-4KF5RH4': 16, 'CHRG-6T5J1FH': 43 };
+  for (const [chargeId, quantity] of Object.entries(quoted)) {
+    for (const line of linesFor(posted, chargeId)) {
+      assert.strictEqual(line.quantity, quantity, `${chargeId} quantity`);
+    }
+  }
+});
+
+test('the seat shortfall against the subscription is reported, not fatal', async () => {
+  const messages = [];
+  const realError = console.error;
+  console.error = (...args) => messages.push(args.map(String).join(' '));
+  try {
+    await runStep2(realCase());
+  } finally {
+    console.error = realError;
+  }
+
+  assert.ok(
+    messages.some(m => /carries 744 seats where the subscription's renewing charges carry 809/.test(m)),
+    `expected a shortfall note, got:\n${messages.join('\n')}`);
+  // The consolidated Y11/12 charge has no line in the rebuild, and that is
+  // where the 65 seats went.
+  assert.ok(
+    messages.some(m => /not represented.*CHRG-ZY51B7H\(qty 68\)/.test(m)),
+    `expected the orphaned charge to be named, got:\n${messages.join('\n')}`);
+});
+
+test('a genuinely dropped line is still caught', async () => {
+  const testCase = realCase();
+  // The draft loses the 360-seat line entirely.
+  testCase.draftRenewal.lineItems = testCase.draftRenewal.lineItems
+    .filter(i => i.chargeId !== 'CHRG-PFR72B4');
+
+  const { posted, output } = await runStep2(testCase);
+
+  assert.strictEqual(posted, null, 'nothing should be created');
+  assert.match(output.error_message, /is below the 744 quoted on ORD-39HY7JN/);
+});
+
+test('pricing and Year Groups survive the plan swap on real data', async () => {
+  const { posted, createdOrder } = await runStep2(realCase());
+
+  const [year1, year2] = linesFor(posted, 'CHRG-PFR72B4');
+  assert.strictEqual(year1.sellUnitPrice, 36);
+  assert.strictEqual(year2.sellUnitPrice, 37.26);
+  assert.strictEqual(yearsOf(year1), '7; 8; 9; 10');
+  assert.strictEqual(yearsOf(year2), '10');
+
+  assert.strictEqual(createdOrder.totalAmount, 54505.44);
+});
+
+// ==================================================
 // SINGLE-PERIOD ORDER — NO REGRESSION
 // ==================================================
 test('a one-year order still builds exactly one line per charge', async () => {

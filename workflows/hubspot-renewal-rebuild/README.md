@@ -80,16 +80,26 @@ Step 2 refuses to create an order rather than create a wrong one:
 - a billable line on the existing order whose window falls outside every ramp
   period, which would silently drop its value
 - a billable line with no Year Groups
-- rebuilt quantity below the expected renewal quantity **in any single
+- rebuilt quantity below the quantity **the existing order quotes for that
   period** — summing the whole order would let a dropped line in one year hide
   behind the duplicate quantity of another
 - more than 6 ramp periods, or a fresh draft that is itself already ramped
 - a renewal term more than 45 days away from the one the existing order was
   quoted for
 
-After creation it warns (without failing the workflow) when the rebuilt total
-drifts more than 10% from the existing order, when the created term is shorter
-than what was built, and on any line the API repriced.
+The quantity check measures against the order being rebuilt, **not** the
+subscription. A renewal is routinely quoted at a different seat count from the
+term it renews — a year group is dropped, students leave, several lines are
+consolidated into fewer — and reproducing that negotiated quote is the job.
+ORD-39HY7JN is exactly this: 744 seats quoted against a subscription whose
+final period carries 809, because the Y11/12 lines were consolidated from
+three charges into two.
+
+Warnings that do not fail the workflow: the rebuilt total drifting more than
+10% from the existing order, a created term shorter than what was built, any
+line the API repriced, a billable subscription charge with no line in the
+rebuild, and a period carrying fewer seats than the subscription's renewing
+charges.
 
 ## Tests
 
