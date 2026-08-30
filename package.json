@@ -1,0 +1,9 @@
+{
+  "name": "slackupdate",
+  "private": true,
+  "version": "0.0.0",
+  "description": "HubSpot custom code actions for the Subskribe renewal order rebuild workflow",
+  "scripts": {
+    "test": "node test/rebuild-renewal-order.test.js"
+  }
+}
