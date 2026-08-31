@@ -13,7 +13,41 @@ commercial terms.
 | 4 | `step4-force-hubspot-sync.js` | Forces the Subskribe → HubSpot order sync |
 
 Each file is pasted whole into its HubSpot action. `SubskribeAPIKey` and
-`API_KEY` come from the action's secrets; the entity id is hard-coded.
+`API_KEY` come from the action's secrets.
+
+## Business units
+
+One set of scripts serves every unit. The workflow picks one with a
+`business_unit` input field; omitting it defaults to `EP`, so an existing
+workflow keeps working untouched.
+
+| Unit | Entity | Notes |
+| --- | --- | --- |
+| `EP` | `ENT-MNJ0N5D` | Education Perfect. Rate-card priced, multi-year ramps common |
+| `EA` | `ENT-H5MFM0T` | Essential Assessment. No price attributes, single period |
+
+The `BUSINESS_UNITS` map at the top of each file holds everything that is
+genuinely unit-specific — the entity id, the HubSpot Orders object type
+(step 1), and the name and label of the per-line custom field the unit treats
+as required. Everything else (plans, charges, attributes, prices, discounts,
+ramp structure) is discovered at runtime from the order and the subscription,
+so adding a unit means adding an entry, not writing code.
+
+Essential Assessment exercises paths EP never reaches, which is why it has its
+own fixture:
+
+- **No `attributeReferences` at all.** EA is not rate-card priced — the sector
+  lives in the choice of plan ("EA Products (2026) Independent" vs
+  "… Government + Religious"), not in a price attribute. Every
+  `buildAttributeKey()` comes back empty, so the attribute-based matching
+  tiers can no longer discriminate and only the subscription charge link,
+  `chargeId` and quantity carry the match. That is fine on three-charge orders;
+  it would be weaker on large ones.
+- **Non-numeric Year Groups.** `P/F/K; 1; 2; 3; 4; 5; 6` is what caught the
+  years normaliser rewriting the quote's own wording. Normalisation is for
+  comparison only; the value is written back exactly as the source had it.
+- Single period, `RENEWAL` rather than `ADD` actions, and a `taxEstimate` field
+  EP orders do not carry.
 
 ## What step 2 has to reconcile
 

@@ -2,8 +2,36 @@ const axios = require('axios');
 
 exports.main = async (event, callback) => {
 
+  // ==================================================
+  // BUSINESS UNITS
+  //
+  // One set of scripts serves every business unit. The HubSpot workflow
+  // picks one with a `business_unit` input field; omitting it defaults to
+  // EP, so an existing workflow keeps working without being touched.
+  //
+  // Only genuinely unit-specific values belong here. Everything else --
+  // plans, charges, attributes, prices, discounts -- is discovered at
+  // runtime from the order and the subscription, so a new unit needs no
+  // code beyond its entry.
+  // ==================================================
+  const BUSINESS_UNITS = {
+    EP: {
+      name: 'Education Perfect',
+      entityId: 'ENT-MNJ0N5D'
+    },
+    EA: {
+      name: 'Essential Assessment',
+      entityId: 'ENT-H5MFM0T'
+    }
+  };
+  const unitKey = String(event.inputFields.business_unit || 'EP').trim().toUpperCase();
+  const unit = BUSINESS_UNITS[unitKey];
+  if (!unit) {
+    throw new Error(`Unknown business_unit "${unitKey}" — expected one of ${Object.keys(BUSINESS_UNITS).join(', ')}`);
+  }
+
   const SUBSKRIBE_API_KEY = process.env.SubskribeAPIKey;
-  const ENTITY_ID = 'ENT-MNJ0N5D';
+  const ENTITY_ID = unit.entityId;
 
   const orderId = event.inputFields.new_renewal_order_id;
 

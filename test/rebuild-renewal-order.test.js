@@ -22,12 +22,13 @@ const axiosStub = require('./stubs/axios.js');
 const step2 = require('../workflows/hubspot-renewal-rebuild/step2-rebuild-renewal-order.js');
 const fixtures = require('./fixtures/methodist-ladies-2year.js');
 const allSaints = require('./fixtures/all-saints-2year.js');
+const ea = require('./fixtures/essential-assessment.js');
 
 const { P1, P2, END } = fixtures;
 
 const round2 = (value) => Math.round(value * 100) / 100;
 
-const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId }) => {
+const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit }) => {
   const enrolledSubscriptionId = subscriptionId || subscription.id;
   let posted = null;
   let createdOrder = null;
@@ -64,7 +65,8 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptio
       {
         inputFields: {
           subskribe_subscription_id: enrolledSubscriptionId,
-          renewal_order_id: existingOrder.id
+          renewal_order_id: existingOrder.id,
+          business_unit: businessUnit
         }
       },
       (result) => resolve(result.outputFields)
@@ -497,6 +499,84 @@ test('a draft offering the term after the quote says the term is already renewed
 
   assert.strictEqual(posted, null);
   assert.match(output.error_message, /that term has already been renewed, so there is nothing to rebuild/);
+});
+
+// ==================================================
+// ESSENTIAL ASSESSMENT
+//
+// A different business unit: no price attributes at all, a single period, a
+// non-numeric Year Group, and RENEWAL rather than ADD actions.
+// ==================================================
+const eaCase = (overrides = {}) => ({
+  subscription: ea.buildSubscription(),
+  existingOrder: ea.buildExistingOrder(),
+  draftRenewal: ea.buildDraftRenewal(),
+  businessUnit: 'EA',
+  ...overrides
+});
+
+test('EA: the rebuild reproduces the quoted total', async () => {
+  const { posted, createdOrder, output } = await runStep2(eaCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+  assert.strictEqual(output.order_periods, 1, 'EA orders are single-period');
+  assert.strictEqual(posted.lineItems.length, 3);
+  assert.strictEqual(createdOrder.totalAmount, 23560);
+
+  const [sold] = posted.lineItems.filter(i => i.quantity > 0);
+  assert.strictEqual(sold.chargeId, 'CHRG-1RTQMX6');
+  assert.strictEqual(sold.quantity, 1240);
+  assert.strictEqual(sold.sellUnitPrice, 19, 'the quoted 19, not the subscription 18');
+  assert.strictEqual(sold.listUnitPrice, 20);
+});
+
+test('EA: a non-numeric Year Group is written back exactly as quoted', async () => {
+  const { posted } = await runStep2(eaCase());
+
+  const [sold] = posted.lineItems.filter(i => i.quantity > 0);
+  assert.strictEqual(yearsOf(sold), 'P/F/K; 1; 2; 3; 4; 5; 6',
+    'normalising is for comparison only — it must not re-sort the quote');
+});
+
+test('EA: charges with no price attributes never get an empty one', async () => {
+  const { posted } = await runStep2(eaCase());
+
+  for (const line of posted.lineItems) {
+    assert.strictEqual(line.attributeReferences, undefined,
+      `${line.chargeId} must not carry attributeReferences`);
+  }
+});
+
+test('EA: a single-period order carries no term or ramp fields', async () => {
+  const { posted } = await runStep2(eaCase());
+
+  assert.strictEqual(posted.startDate, ea.RENEWAL_START);
+  assert.strictEqual(posted.endDate, ea.RENEWAL_END);
+  assert.strictEqual(posted.termLength, undefined);
+  assert.strictEqual(posted.rampInterval, undefined);
+  assert.ok(posted.lineItems.every(i => i.isRamp === undefined));
+});
+
+test('EA runs against the EA entity, EP against EP', async () => {
+  await runStep2(eaCase());
+  const eaHeaders = axiosStub.__calls()[0].data.headers;
+  assert.strictEqual(eaHeaders['X-Entity-Id'], 'ENT-H5MFM0T');
+
+  await runStep2({
+    subscription: fixtures.buildRealSubscription(),
+    existingOrder: fixtures.buildExistingTwoYearOrder(),
+    draftRenewal: fixtures.buildPlanSwapDraft()
+  });
+  const epHeaders = axiosStub.__calls()[0].data.headers;
+  assert.strictEqual(epHeaders['X-Entity-Id'], 'ENT-MNJ0N5D',
+    'omitting business_unit must keep the existing EP workflow on EP');
+});
+
+test('an unknown business unit is refused', async () => {
+  const { posted, output } = await runStep2(eaCase({ businessUnit: 'XX' }));
+
+  assert.strictEqual(posted, null);
+  assert.match(output.error_message, /Unknown business_unit "XX" — expected one of EP, EA/);
 });
 
 // ==================================================

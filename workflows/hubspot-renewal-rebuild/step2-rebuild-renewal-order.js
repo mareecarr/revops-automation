@@ -6,8 +6,40 @@ exports.main = async (event, callback) => {
   const existingRenewalOrderId = event.inputFields.renewal_order_id;
 
   try {
+    // ==================================================
+    // BUSINESS UNITS
+    //
+    // One set of scripts serves every business unit. The HubSpot workflow
+    // picks one with a `business_unit` input field; omitting it defaults to
+    // EP, so an existing workflow keeps working without being touched.
+    //
+    // Only genuinely unit-specific values belong here. Everything else --
+    // plans, charges, attributes, prices, discounts -- is discovered at
+    // runtime from the order and the subscription, so a new unit needs no
+    // code beyond its entry.
+    // ==================================================
+    const BUSINESS_UNITS = {
+      EP: {
+        name: 'Education Perfect',
+        entityId: 'ENT-MNJ0N5D',
+        yearsFieldName: 'years',
+        yearsFieldLabel: 'Year Groups'
+      },
+      EA: {
+        name: 'Essential Assessment',
+        entityId: 'ENT-H5MFM0T',
+        yearsFieldName: 'years',
+        yearsFieldLabel: 'Year Groups'
+      }
+    };
+    const unitKey = String(event.inputFields.business_unit || 'EP').trim().toUpperCase();
+    const unit = BUSINESS_UNITS[unitKey];
+    if (!unit) {
+      throw new Error(`Unknown business_unit "${unitKey}" — expected one of ${Object.keys(BUSINESS_UNITS).join(', ')}`);
+    }
+
     const SUBSKRIBE_API_KEY = process.env.SubskribeAPIKey;
-    const ENTITY_ID = 'ENT-MNJ0N5D';
+    const ENTITY_ID = unit.entityId;
     const API_BASE = 'https://api.app.subskribe.com';
 
     // HubSpot kills a custom code action at 20 seconds. Four sequential
@@ -45,7 +77,7 @@ exports.main = async (event, callback) => {
       'X-Entity-Id': ENTITY_ID
     };
 
-    console.log(`=== STEP 2 REBUILD === ${subscriptionId} -> ${existingRenewalOrderId}`);
+    console.log(`=== STEP 2 REBUILD ${unitKey} === ${subscriptionId} -> ${existingRenewalOrderId}`);
 
     // ==================================================
     // HELPERS
@@ -107,7 +139,7 @@ exports.main = async (event, callback) => {
       (attributeReferences || []).map(r => r.attributeValue).filter(Boolean).join('+') || 'none';
 
     const getYearsCustomField = (item) => {
-      return getCustomFieldsArray(item).find(cf => cf.name === 'years');
+      return getCustomFieldsArray(item).find(cf => cf.name === unit.yearsFieldName);
     };
 
     const getYearsValue = (item) => normaliseYearsValue(getYearsCustomField(item)?.value);
@@ -119,7 +151,12 @@ exports.main = async (event, callback) => {
       const normalisedValue = normaliseYearsValue(yearsCf.value);
       if (!normalisedValue) return null;
       return {
-        value: normalisedValue,
+        // Written back exactly as the source had it. Normalising is for
+        // COMPARISON only — sorting it would rewrite the quote's own wording.
+        // EP's year groups are all numeric so the sort was invisible there,
+        // but EA leads with "P/F/K", which sorting moves to the end:
+        // "P/F/K; 1; 2; 3; 4; 5; 6" would come back "1; 2; 3; 4; 5; 6; P/F/K".
+        value: String(yearsCf.value),
         selections: Array.from(
           new Set(
             (yearsCf.selections || [])
@@ -141,13 +178,13 @@ exports.main = async (event, callback) => {
     const injectYearsField = (item, yearsData, orderYearsFieldId) => {
       if (!yearsData) return item;
       const customFields = [...getCustomFieldsArray(item)];
-      const existingYearsIndex = customFields.findIndex(cf => cf.name === 'years');
+      const existingYearsIndex = customFields.findIndex(cf => cf.name === unit.yearsFieldName);
       const existingYearsCf = existingYearsIndex >= 0 ? customFields[existingYearsIndex] : null;
       const yearsField = {
         id: orderYearsFieldId || (existingYearsCf ? existingYearsCf.id : crypto.randomUUID()),
         type: 'MULTISELECT_PICKLIST',
-        name: 'years',
-        label: 'Year Groups',
+        name: unit.yearsFieldName,
+        label: unit.yearsFieldLabel,
         value: yearsData.value,
         selections: yearsData.selections,
         options: existingYearsCf ? (existingYearsCf.options || []) : [],
@@ -1154,7 +1191,7 @@ exports.main = async (event, callback) => {
     const missingYears = mergedLineItems.filter(item =>
       item.quantity > 0 && !getYearsCustomField(item)?.value);
     if (missingYears.length > 0) {
-      throw new Error(`Missing Year Groups on ${missingYears.length} billable line item(s): ${missingYears.map(i => `${i.chargeId}(qty ${i.quantity})`).join(', ')}`);
+      throw new Error(`Missing ${unit.yearsFieldLabel} on ${missingYears.length} billable line item(s): ${missingYears.map(i => `${i.chargeId}(qty ${i.quantity})`).join(', ')}`);
     }
 
     if (swappedLines.length > 0) {
