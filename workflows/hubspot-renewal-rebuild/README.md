@@ -49,6 +49,28 @@ own fixture:
 - Single period, `RENEWAL` rather than `ADD` actions, and a `taxEstimate` field
   EP orders do not carry.
 
+### EA renews onto a deprecated plan, and the rebuild cannot fix that
+
+No `replacementPlanIds` are configured on any EA plan. So `draftRenewal` for
+SUB-N0JCC5Q proposes **PLAN-T7N6194** — the deprecated 2025 plan — carrying the
+subscription forward at its own negotiated price rather than re-versioning onto
+the 2026 plans. The rebuild reproduces the quote on whatever plan the draft
+proposes; it does not migrate plans, and it has no way to know that
+PLAN-46REVQW and PLAN-YYEMQ4K supersede PLAN-T7N6194.
+
+Contrast EP, where replacement plans *are* configured: its swapped lines carry
+`replacedPlanId: "PLAN-CMJB619"`, which is what drives the cross-charge
+matching passes.
+
+The catch for EA is that the 2026 catalog splits by sector into two plans
+(Independent and Government + Religious). Subskribe's plan replacement is
+per-plan, not per-account, so a single `replacementPlanIds` on PLAN-T7N6194
+cannot serve both — which is probably why it is unset. Migrating plans in the
+rebuild instead would need a sector signal available at runtime (nothing on
+the order, subscription or account carries one) plus an explicit old-charge to
+new-charge mapping, and it would change this tool's job from *reproduce the
+quote* to *migrate the quote*.
+
 ## What step 2 has to reconcile
 
 `draftRenewal` returns a clean single-period order priced at catalog, with the

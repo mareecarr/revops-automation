@@ -180,9 +180,16 @@ const buildSubscription = () => ({
     }))
 });
 
-// A fresh draft: same plan, same charge ids, catalog pricing, Year Groups
-// unset. PLAN-T7N6194 is still ACTIVE with no replacement plan configured, so
-// there is no charge rename to reconcile here.
+// The real draft for SUB-N0JCC5Q (captured as ORD-C2MRPV6).
+//
+// Subskribe carries the subscription straight forward: the SAME plan
+// (PLAN-T7N6194, the deprecated 2025 one), the same charge ids, and the
+// subscription's own negotiated price — sell 18 at a 10% discount, not the
+// 20 catalog list. No replacementPlanIds are configured on any EA plan, so
+// there is no re-version to the 2026 plans and no charge rename to reconcile.
+//
+// That matters for the rebuild: the draft's 18 must lose to the 19 the
+// renewal was quoted at, or the rebuild would quietly undo the uplift.
 const buildDraftRenewal = ({ startDate = RENEWAL_START, endDate = RENEWAL_END } = {}) => ({
   accountId: 'ACCT-6RRFE93',
   orderType: 'RENEWAL',
@@ -196,10 +203,12 @@ const buildDraftRenewal = ({ startDate = RENEWAL_START, endDate = RENEWAL_END } 
   billingCycle: { cycle: 'YEAR', step: 1 },
   billingTerm: 'UP_FRONT',
   billingAnchorDate: startDate,
-  termLength: { cycle: 'YEAR', step: 1 },
   autoRenew: true,
   ownerId: 'USER-J04C7EZ',
-  lineItems: SUBSCRIPTION_CHARGES.map(([subChargeId, chargeId, quantity, list], index) => ({
+  subscriptionTargetVersion: 1,
+  totalAmount: 22320,
+  totalListAmount: 24800,
+  lineItems: SUBSCRIPTION_CHARGES.map(([subChargeId, chargeId, quantity, list, sell, years], index) => ({
     id: `ea-draft-${index + 1}`,
     isDryRunItem: false,
     action: 'RENEWAL',
@@ -208,11 +217,27 @@ const buildDraftRenewal = ({ startDate = RENEWAL_START, endDate = RENEWAL_END } 
     subscriptionChargeId: subChargeId,
     quantity,
     listUnitPrice: list,
-    sellUnitPrice: list,
-    discounts: [],
+    sellUnitPrice: sell,
+    discountAmount: (list - sell) * quantity,
+    discounts: sell < list
+      ? [{
+        name: 'default',
+        percent: 1 - (sell / list),
+        discountAmount: null,
+        status: null,
+        discountedPrice: null,
+        amount: (list - sell) * quantity
+      }]
+      : [],
+    predefinedDiscounts: [],
+    amount: sell * quantity,
+    listAmount: list * quantity,
+    taxEstimate: sell * quantity * 0.1,
     effectiveDate: startDate,
     endDate,
-    customFields: orderCustomFields(null)
+    // The draft carries the subscription's Year Groups forward, unlike EP's
+    // plan-swap drafts which default them away.
+    customFields: orderCustomFields(years)
   })),
   customFields: []
 });

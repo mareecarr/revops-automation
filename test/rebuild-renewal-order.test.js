@@ -530,6 +530,29 @@ test('EA: the rebuild reproduces the quoted total', async () => {
   assert.strictEqual(sold.listUnitPrice, 20);
 });
 
+test('EA: the quoted price beats the price the draft proposes', async () => {
+  const { posted, createdOrder } = await runStep2(eaCase());
+
+  // The real draft carries the subscription forward at its own negotiated
+  // 18 (10% off), while the renewal was quoted at 19 (5% off). Taking the
+  // draft's number would quietly undo the uplift the rep agreed.
+  const [sold] = posted.lineItems.filter(i => i.quantity > 0);
+  assert.strictEqual(sold.sellUnitPrice, 19);
+  assert.strictEqual(round2(sold.discounts[0].percent), 0.05);
+  assert.strictEqual(createdOrder.totalAmount, 23560,
+    'the quoted 23,560 — not the draft\'s 22,320');
+});
+
+test('EA: the plan the draft proposes is carried through unchanged', async () => {
+  const { posted } = await runStep2(eaCase());
+
+  // No replacementPlanIds are configured on any EA plan, so draftRenewal
+  // proposes PLAN-T7N6194 — the deprecated 2025 plan — and the rebuild
+  // reproduces the quote on it. It does not migrate plans.
+  assert.ok(posted.lineItems.every(i => i.planId === 'PLAN-T7N6194'));
+  assert.ok(posted.lineItems.every(i => i.replacedPlanId === undefined));
+});
+
 test('EA: a non-numeric Year Group is written back exactly as quoted', async () => {
   const { posted } = await runStep2(eaCase());
 
