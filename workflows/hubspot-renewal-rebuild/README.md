@@ -26,6 +26,12 @@ workflow keeps working untouched.
 | `EP` | `ENT-MNJ0N5D` | Education Perfect. Rate-card priced, multi-year ramps common |
 | `EA` | `ENT-H5MFM0T` | Essential Assessment. No price attributes, single period |
 
+To point a workflow at a unit, add a **text input field** named
+`business_unit` to each custom code action and set it to the literal `EP` or
+`EA`. The lookup is case-insensitive and trims whitespace; an unrecognised
+value fails loudly rather than falling back to a default, so a typo can't
+silently create an order against the wrong entity.
+
 The `BUSINESS_UNITS` map at the top of each file holds everything that is
 genuinely unit-specific — the entity id, the HubSpot Orders object type
 (step 1), and the name and label of the per-line custom field the unit treats
@@ -65,11 +71,15 @@ matching passes.
 The catch for EA is that the 2026 catalog splits by sector into two plans
 (Independent and Government + Religious). Subskribe's plan replacement is
 per-plan, not per-account, so a single `replacementPlanIds` on PLAN-T7N6194
-cannot serve both — which is probably why it is unset. Migrating plans in the
-rebuild instead would need a sector signal available at runtime (nothing on
-the order, subscription or account carries one) plus an explicit old-charge to
-new-charge mapping, and it would change this tool's job from *reproduce the
-quote* to *migrate the quote*.
+cannot serve both — which is probably why it is unset.
+
+**Decided: leave it.** EA renewals rebuild on whatever plan the draft
+proposes, deprecated or not, and a rep moves one to 2026 pricing by hand when
+it matters. Migrating plans automatically was considered and rejected: it would
+need a sector signal available at runtime (nothing on the order, subscription
+or account carries one) plus an explicit old-charge to new-charge mapping, and
+it would change this tool's job from *reproduce the quote* to *migrate the
+quote*. Don't add it without fresh sign-off and real examples.
 
 ## What step 2 has to reconcile
 
