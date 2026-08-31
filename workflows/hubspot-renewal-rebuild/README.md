@@ -87,19 +87,39 @@ Step 2 refuses to create an order rather than create a wrong one:
 - a renewal term more than 45 days away from the one the existing order was
   quoted for
 
-The quantity check measures against the order being rebuilt, **not** the
-subscription. A renewal is routinely quoted at a different seat count from the
-term it renews — a year group is dropped, students leave, several lines are
-consolidated into fewer — and reproducing that negotiated quote is the job.
-ORD-39HY7JN is exactly this: 744 seats quoted against a subscription whose
-final period carries 809, because the Y11/12 lines were consolidated from
-three charges into two.
+## The quote is the spec, not the subscription
+
+Everything above rests on one rule: **the rebuild reproduces the order being
+rebuilt.** The subscription says what *could* renew; the order says what was
+actually sold, and the two differ all the time.
+
+That cuts both ways, and both directions have bitten:
+
+- **Fewer seats on a line.** ORD-39HY7JN quotes 744 seats against a
+  subscription whose final period carries 809, because the Y11/12 lines were
+  consolidated from three charges into two. So the quantity check measures
+  each period against what the existing order quotes for that period, never
+  against the subscription — otherwise every renewal quoted down is refused.
+- **Fewer lines.** ORD-WD9TZMR is a 790-seat quote against a subscription that
+  took a mid-term amendment adding a block of "Plus" upgrade charges the deal
+  does not carry forward. Those charges are live right up to the subscription's
+  end, so the draft keeps offering them — ten billable lines and 1,685 seats.
+  A billable draft line that matches nothing anywhere in the existing order is
+  therefore left out and named in the log. Building it would not reproduce the
+  quote, it would write a new one at roughly double the value.
+
+Zero-quantity lines are exempt from that rule: they are catalog placeholders,
+they carry no value, and the existing order carries them too.
 
 Warnings that do not fail the workflow: the rebuilt total drifting more than
 10% from the existing order, a created term shorter than what was built, any
 line the API repriced, a billable subscription charge with no line in the
-rebuild, and a period carrying fewer seats than the subscription's renewing
-charges.
+rebuild, billable draft lines left out because the quote does not carry them,
+and a period carrying fewer seats than the subscription's renewing charges.
+
+Logs are kept under HubSpot's 4KB ceiling: per-line output is capped at 12
+billable lines, later ramp periods are summarised rather than listed, and
+every charge list is truncated with a `(+N)` count.
 
 ## Tests
 

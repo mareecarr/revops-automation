@@ -819,6 +819,43 @@ exports.main = async (event, callback) => {
       return rampedLine[index] ? { item: null, via: 'none' } : fullSpanMatchSet.matches[index];
     });
 
+    // ==================================================
+    // LINES THE QUOTE DOES NOT CARRY
+    //
+    // A fresh draft proposes every charge that renews. The order being
+    // rebuilt is a negotiated subset of that: a mid-term upgrade the
+    // customer is not carrying forward, a year group dropped, seats
+    // consolidated onto fewer lines. Those charges are still live on the
+    // subscription, so the draft keeps offering them.
+    //
+    // Building them anyway does not reproduce the quote, it writes a new
+    // and much larger one — on ORD-WD9TZMR it would have added ten lines
+    // and 1,685 seats to a 790-seat order. So a BILLABLE draft line that
+    // matches nothing anywhere in the existing order is left out, and
+    // named in the log so a genuine omission is still visible.
+    //
+    // Zero-quantity lines are kept regardless: they are catalog
+    // placeholders, they carry no value, and the existing order carries
+    // them too.
+    // ==================================================
+    const draftLineQuantity = ({ item, charge }) =>
+      (charge && charge.quantity != null) ? charge.quantity : (item.quantity || 0);
+
+    const droppedLines = [];
+    let droppedQuantity = 0;
+    const keepLine = draftResolutions.map((resolution, index) => {
+      const matchedTheQuote = segmentMatchSets.some(set => set.matches[index].item)
+        || !!fullSpanMatchSet.matches[index].item;
+      if (matchedTheQuote) return true;
+
+      const quantity = draftLineQuantity(resolution);
+      if (quantity <= 0) return true;
+
+      droppedLines.push(`${resolution.item.chargeId}(qty ${quantity})`);
+      droppedQuantity += quantity;
+      return false;
+    });
+
     // A cross-charge match hands back the subscription charge the draft
     // could not find: the existing order line records the UUID even when
     // the swap draft omits it. That charge is the authority on quantity and
@@ -1020,8 +1057,11 @@ exports.main = async (event, callback) => {
     // are summarised, because the log has a 4KB ceiling and a three-year
     // order would otherwise blow through it.
     const segmentSummaries = segments.map(() => ({ lines: 0, quantity: 0, value: 0 }));
+    const LOGGED_LINE_LIMIT = 12;
+    let loggedLines = 0;
     draftResolutions.forEach((resolution, index) => {
       const { item: draftItem, via } = resolution;
+      if (!keepLine[index]) return;
       if (!resolution.charge) unresolvedCharges.push(draftItem.chargeId);
 
       const plan = rampedLine[index]
@@ -1039,8 +1079,11 @@ exports.main = async (event, callback) => {
         }
 
         const isLogged = segmentIndex == null || segmentIndex === 0;
-        if (lineItem.quantity > 0 && isLogged) {
+        if (lineItem.quantity > 0 && isLogged && loggedLines < LOGGED_LINE_LIMIT) {
+          loggedLines += 1;
           console.log(`[${index}]${segmentIndex != null ? `p1` : ''} ${lineItem.chargeId} sub=${via} ord=${existingMatch.via} qty=${lineItem.quantity} attrs=${describeAttributes(lineItem.attributeReferences)} years="${getYearsCustomField(lineItem)?.value || 'null'}" ${pricingMode}`);
+        } else if (lineItem.quantity > 0 && isLogged) {
+          loggedLines += 1;
         } else if (lineItem.quantity <= 0 && isLogged) {
           zeroQuantityLines.push(lineItem.chargeId);
         }
@@ -1049,6 +1092,9 @@ exports.main = async (event, callback) => {
       }
     });
 
+    if (loggedLines > LOGGED_LINE_LIMIT) {
+      console.log(`(+${loggedLines - LOGGED_LINE_LIMIT} more billable line(s) not logged — 4KB ceiling)`);
+    }
     if (zeroQuantityLines.length > 0) {
       console.log(`${zeroQuantityLines.length} zero-quantity line(s) carried through: ${zeroQuantityLines.slice(0, 6).join(', ')}${zeroQuantityLines.length > 6 ? ` (+${zeroQuantityLines.length - 6})` : ''}`);
     }
@@ -1068,10 +1114,16 @@ exports.main = async (event, callback) => {
       throw new Error(`Rebuild produced 0 line items — refusing to create order. draftItems=${draftLineItems.length} subscriptionCharges=${subscriptionCharges.length}`);
     }
 
+    const keptLineCount = keepLine.filter(Boolean).length;
     const expectedLineCount = rampedLine.reduce(
-      (sum, ramped) => sum + (ramped ? segments.length : 1), 0);
+      (sum, ramped, index) => keepLine[index] ? sum + (ramped ? segments.length : 1) : sum, 0);
     if (mergedLineItems.length !== expectedLineCount) {
-      throw new Error(`Line item count mismatch: built ${mergedLineItems.length}, expected ${expectedLineCount} from ${draftLineItems.length} draft items across ${segments.length} period(s)`);
+      throw new Error(`Line item count mismatch: built ${mergedLineItems.length}, expected ${expectedLineCount} from ${keptLineCount} of ${draftLineItems.length} draft items across ${segments.length} period(s)`);
+    }
+
+    if (droppedLines.length > 0) {
+      const shownDropped = droppedLines.slice(0, 5).join(', ');
+      console.error(`WARNING: ${droppedLines.length} billable draft line(s) totalling ${droppedQuantity} seats are not on ${existingRenewalOrderId} and were left out: ${shownDropped}${droppedLines.length > 5 ? ` (+${droppedLines.length - 5})` : ''} — the rebuild reproduces the quote; add them by hand if they should renew`);
     }
 
     const missingYears = mergedLineItems.filter(item =>
@@ -1119,6 +1171,7 @@ exports.main = async (event, callback) => {
       .filter(i => i.segmentIndex == null)
       .reduce((s, i) => s + (i.quantity || 0), 0);
 
+    let leanestPeriod = null;
     for (let k = 0; k < segments.length; k++) {
       const rebuiltQuantity = mergedLineItems
         .filter(i => i.segmentIndex === k)
@@ -1133,13 +1186,17 @@ exports.main = async (event, callback) => {
         throw new Error(`Rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId} — line items were dropped`);
       }
 
-      // Not a failure: the rebuild matches what was quoted. Surfaced because
-      // a renewal well below the term it renews is worth a human glance
-      // before it goes out, whether it is a deliberate reduction or an
-      // oversight in the order being rebuilt.
-      if (rebuiltQuantity < subscriptionQuantity) {
-        console.error(`NOTE: period ${k + 1} carries ${rebuiltQuantity} seats where the subscription's renewing charges carry ${subscriptionQuantity} (${subscriptionQuantity - rebuiltQuantity} fewer) — this matches ${existingRenewalOrderId}, but check it is intended before sending`);
+      if (leanestPeriod == null || rebuiltQuantity < leanestPeriod.quantity) {
+        leanestPeriod = { period: k + 1, quantity: rebuiltQuantity };
       }
+    }
+
+    // Not a failure: the rebuild matches what was quoted. Reported once, on
+    // the thinnest period, because a renewal well below the term it renews is
+    // worth a human glance before it goes out — whether that is a deliberate
+    // reduction or an oversight in the order being rebuilt.
+    if (leanestPeriod && leanestPeriod.quantity < subscriptionQuantity) {
+      console.error(`NOTE: period ${leanestPeriod.period} carries ${leanestPeriod.quantity} seats where the subscription's renewing charges carry ${subscriptionQuantity} (${subscriptionQuantity - leanestPeriod.quantity} fewer) — this matches ${existingRenewalOrderId}, but check it is intended before sending`);
     }
 
     // ==================================================

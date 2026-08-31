@@ -21,6 +21,7 @@ Module._resolveFilename = function (request, ...rest) {
 const axiosStub = require('./stubs/axios.js');
 const step2 = require('../workflows/hubspot-renewal-rebuild/step2-rebuild-renewal-order.js');
 const fixtures = require('./fixtures/methodist-ladies-2year.js');
+const allSaints = require('./fixtures/all-saints-2year.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -362,6 +363,81 @@ test('pricing and Year Groups survive the plan swap on real data', async () => {
   assert.strictEqual(yearsOf(year2), '10');
 
   assert.strictEqual(createdOrder.totalAmount, 54505.44);
+});
+
+// ==================================================
+// ALL SAINTS' — A DRAFT THAT OFFERS MORE THAN THE QUOTE
+//
+// A mid-term amendment added a block of Plus charges the renewal does not
+// carry forward. draftRenewal still offers all of them, so the fresh draft
+// proposes ten billable lines and 1,685 seats the 790-seat quote omits.
+// ==================================================
+const allSaintsCase = () => ({
+  subscription: allSaints.buildSubscription(),
+  existingOrder: allSaints.buildExistingOrder(),
+  draftRenewal: allSaints.buildDraftRenewal()
+});
+
+test('lines the quote does not carry are left out, not invented', async () => {
+  const { posted, output } = await runStep2(allSaintsCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+
+  const billable = posted.lineItems.filter(i => i.quantity > 0);
+  const chargeIds = [...new Set(billable.map(i => i.chargeId))].sort();
+  assert.deepStrictEqual(chargeIds,
+    ['CHRG-6T5J1FH', 'CHRG-PFR72B4', 'CHRG-TQ9CHVP', 'CHRG-W9V9GW5'],
+    'only the four charges the deal was quoted on may be billable');
+
+  const period1 = billable.filter(i => i.effectiveDate === P1)
+    .reduce((sum, i) => sum + i.quantity, 0);
+  const period2 = billable.filter(i => i.effectiveDate === P2)
+    .reduce((sum, i) => sum + i.quantity, 0);
+  assert.strictEqual(period1, 790, 'period 1 must be the 790 seats quoted, not 2475');
+  assert.strictEqual(period2, 790);
+});
+
+test('the rebuilt All Saints order reproduces the quoted total exactly', async () => {
+  const { createdOrder } = await runStep2(allSaintsCase());
+  assert.strictEqual(createdOrder.totalAmount, 72490.8);
+});
+
+test('the omitted lines are reported with their seat count', async () => {
+  const messages = [];
+  const realError = console.error;
+  console.error = (...args) => messages.push(args.map(String).join(' '));
+  try {
+    await runStep2(allSaintsCase());
+  } finally {
+    console.error = realError;
+  }
+
+  assert.ok(
+    messages.some(m => /10 billable draft line\(s\) totalling 1685 seats are not on ORD-WD9TZMR/.test(m)),
+    `expected the dropped lines to be reported, got:\n${messages.join('\n')}`);
+});
+
+test('the tier change between periods is carried per period', async () => {
+  const { posted } = await runStep2(allSaintsCase());
+
+  // "Plus 2027 only": period 1 is quoted at Plus, period 2 falls back to Core.
+  const [year1, year2] = linesFor(posted, 'CHRG-W9V9GW5');
+  const tierOf = (line) => (line.attributeReferences || [])
+    .find(r => r.attributeDefinitionId === 'PATTRB-817VQ5E')?.attributeValue;
+  assert.strictEqual(tierOf(year1), 'Plus');
+  assert.strictEqual(tierOf(year2), 'Core');
+  assert.strictEqual(year1.quantity, 160);
+  assert.strictEqual(year2.quantity, 160);
+});
+
+test('zero-quantity catalog lines are never dropped', async () => {
+  const { posted } = await runStep2(allSaintsCase());
+
+  // 21 in the draft: 15 that the quote carries plus 6 it does not. All are
+  // harmless placeholders and all come through as single full-span lines.
+  const zeroQuantity = posted.lineItems.filter(i => i.quantity === 0);
+  assert.strictEqual(zeroQuantity.length, 21);
+  assert.ok(zeroQuantity.every(i => i.effectiveDate === P1 && i.endDate === END));
 });
 
 // ==================================================
