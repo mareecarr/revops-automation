@@ -70,7 +70,7 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal }) => {
     ).catch(reject);
   });
 
-  return { posted, createdOrder, output };
+  return { posted, createdOrder, output, draftRenewal };
 };
 
 const linesFor = (payload, chargeId) => payload.lineItems
@@ -402,7 +402,7 @@ test('the rebuilt All Saints order reproduces the quoted total exactly', async (
   assert.strictEqual(createdOrder.totalAmount, 72490.8);
 });
 
-test('the omitted lines are reported with their seat count', async () => {
+test('the zeroed lines are reported with their seat count', async () => {
   const messages = [];
   const realError = console.error;
   console.error = (...args) => messages.push(args.map(String).join(' '));
@@ -413,15 +413,15 @@ test('the omitted lines are reported with their seat count', async () => {
   }
 
   assert.ok(
-    messages.some(m => /10 billable draft line\(s\) totalling 1685 seats are not on ORD-WD9TZMR/.test(m)),
-    `expected the dropped lines to be reported, got:\n${messages.join('\n')}`);
+    messages.some(m => /10 charge\(s\) worth 1685 seats are offered by the draft but not on ORD-WD9TZMR — held at qty 0/.test(m)),
+    `expected the zeroed lines to be reported, got:\n${messages.join('\n')}`);
 });
 
 test('the tier change between periods is carried per period', async () => {
   const { posted } = await runStep2(allSaintsCase());
 
   // "Plus 2027 only": period 1 is quoted at Plus, period 2 falls back to Core.
-  const [year1, year2] = linesFor(posted, 'CHRG-W9V9GW5');
+  const [year1, year2] = linesFor(posted, 'CHRG-W9V9GW5').filter(i => i.quantity > 0);
   const tierOf = (line) => (line.attributeReferences || [])
     .find(r => r.attributeDefinitionId === 'PATTRB-817VQ5E')?.attributeValue;
   assert.strictEqual(tierOf(year1), 'Plus');
@@ -430,13 +430,21 @@ test('the tier change between periods is carried per period', async () => {
   assert.strictEqual(year2.quantity, 160);
 });
 
-test('zero-quantity catalog lines are never dropped', async () => {
-  const { posted } = await runStep2(allSaintsCase());
+test('every draft line survives, so no plan is left half-represented', async () => {
+  const { posted, draftRenewal } = await runStep2(allSaintsCase());
 
-  // 21 in the draft: 15 that the quote carries plus 6 it does not. All are
-  // harmless placeholders and all come through as single full-span lines.
+  // Subskribe rejects an order that carries some of a plan's charges and not
+  // others ("charges ... from plan id ... are missing in order"), so nothing
+  // may be removed — the lines the quote does not carry are held at zero.
+  const draftCharges = new Set(draftRenewal.lineItems.map(i => `${i.planId}|${i.chargeId}`));
+  const postedCharges = new Set(posted.lineItems.map(i => `${i.planId}|${i.chargeId}`));
+  for (const charge of draftCharges) {
+    assert.ok(postedCharges.has(charge), `${charge} was dropped from the payload`);
+  }
+
+  // 21 catalog placeholders + 10 charges the quote does not carry.
   const zeroQuantity = posted.lineItems.filter(i => i.quantity === 0);
-  assert.strictEqual(zeroQuantity.length, 21);
+  assert.strictEqual(zeroQuantity.length, 31);
   assert.ok(zeroQuantity.every(i => i.effectiveDate === P1 && i.endDate === END));
 });
 

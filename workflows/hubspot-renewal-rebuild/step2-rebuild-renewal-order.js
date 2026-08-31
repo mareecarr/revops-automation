@@ -45,8 +45,7 @@ exports.main = async (event, callback) => {
       'X-Entity-Id': ENTITY_ID
     };
 
-    console.log('=== STEP 2 — REBUILD RENEWAL ORDER ===');
-    console.log(`Subscription: ${subscriptionId} | Existing renewal order: ${existingRenewalOrderId}`);
+    console.log(`=== STEP 2 REBUILD === ${subscriptionId} -> ${existingRenewalOrderId}`);
 
     // ==================================================
     // HELPERS
@@ -288,7 +287,7 @@ exports.main = async (event, callback) => {
     );
     const subscription = subResponse.data;
     const subscriptionCharges = subscription.charges || [];
-    console.log(`Subscription state=${subscription.state} charges=${subscriptionCharges.length}`);
+    const subscriptionSummary = `sub ${subscription.state} charges=${subscriptionCharges.length}`;
 
     const existingOrderResponse = await axios.get(
       `${API_BASE}/orders/${existingRenewalOrderId}`,
@@ -296,8 +295,7 @@ exports.main = async (event, callback) => {
     );
     const existingOrder = existingOrderResponse.data;
     const existingLineItems = existingOrder.lineItems || [];
-    console.log(`Existing order status=${existingOrder.status} lineItems=${existingLineItems.length} total=${existingOrder.totalAmount}`);
-    console.log(`Opportunity: ${existingOrder.sfdcOpportunityId} | ${existingOrder.sfdcOpportunityName}`);
+    console.log(`${subscriptionSummary} | order ${existingOrder.status} lines=${existingLineItems.length} total=${existingOrder.totalAmount} oppty=${existingOrder.sfdcOpportunityId}`);
 
     const newDraftResponse = await axios.get(
       `${API_BASE}/subscriptions/${subscriptionId}/draftRenewal`,
@@ -305,7 +303,7 @@ exports.main = async (event, callback) => {
     );
     const newOrder = newDraftResponse.data;
     const draftLineItems = newOrder.lineItems || [];
-    console.log(`Fresh draft lineItems=${draftLineItems.length}`);
+    console.log(`Fresh draft lines=${draftLineItems.length}`);
 
     // ==================================================
     // SEGMENT PLAN — MULTI-YEAR / RAMPED ORDERS
@@ -384,8 +382,8 @@ exports.main = async (event, callback) => {
     const fullSpanWindow = { start: orderStartDate, end: orderEndDate };
 
     if (isMultiSegment) {
-      console.log(`Multi-period order: ${segments.length} periods, term ${formatDate(orderStartDate)} -> ${formatDate(orderEndDate)}${dateShift ? ` (shifted ${Math.round(dateShift / 86400)}d from existing order)` : ''}`);
-      targetWindows.forEach((w, k) => console.log(`  period ${k + 1}: ${formatDate(w.start)} -> ${formatDate(w.end)}`));
+      const boundaries = [...targetWindows.map(w => formatDate(w.start)), formatDate(orderEndDate)].join('|');
+      console.log(`${segments.length} periods ${boundaries}${dateShift ? ` shifted ${Math.round(dateShift / 86400)}d` : ''}`);
     }
 
     // Existing lines are pooled by the period they cover, so each replica
@@ -413,7 +411,7 @@ exports.main = async (event, callback) => {
       if (strays.length > 0) {
         console.log(`${strays.length} zero-quantity existing line(s) outside every ramp period — ignored`);
       }
-      console.log(`Existing lines pooled: ${segmentPools.map((p, k) => `p${k + 1}=${p.length}`).join(' ')} fullSpan=${fullSpanPool.length}`);
+      console.log(`Pooled: ${segmentPools.map((p, k) => `p${k + 1}=${p.length}`).join(' ')} full=${fullSpanPool.length}`);
     }
 
     // ==================================================
@@ -718,7 +716,7 @@ exports.main = async (event, callback) => {
 
     const orderYearsFieldId = findOrderYearsFieldId(draftLineItems)
       || findOrderYearsFieldId(existingLineItems);
-    console.log(`Order years field ID: ${orderYearsFieldId || 'NOT FOUND'}`);
+    if (!orderYearsFieldId) console.log('Order years field ID: NOT FOUND');
 
     // ==================================================
     // AVERAGE PRICE INCREASE
@@ -743,7 +741,7 @@ exports.main = async (event, callback) => {
       ? (increaseRatios.reduce((sum, r) => sum + r, 0) / increaseRatios.length)
       : 1.0;
     const hasAnyIncrease = averageIncreaseRatio > 1.0;
-    console.log(`Average increase ratio: ${averageIncreaseRatio.toFixed(6)} (from ${increaseRatios.length} same-plan lines)`);
+    const increaseSummary = `increase=${averageIncreaseRatio.toFixed(4)} (${increaseRatios.length} same-plan)`;
 
     // ==================================================
     // PERIOD-OVER-PERIOD UPLIFT
@@ -773,14 +771,14 @@ exports.main = async (event, callback) => {
           ? observed.reduce((sum, r) => sum + r, 0) / observed.length
           : 1;
       }
-      console.log(`Period uplift vs period 1: ${segmentUpliftRatios.map((r, k) => `p${k + 1}=${r.toFixed(4)}`).join(' ')}`);
+      console.log(`${increaseSummary} ramp ${segmentUpliftRatios.map((r, k) => `p${k + 1}=${r.toFixed(4)}`).join(' ')}`);
+    } else {
+      console.log(increaseSummary);
     }
 
     // ==================================================
     // BUILD LINE ITEMS
     // ==================================================
-    console.log('=== BUILDING LINE ITEMS ===');
-
     const { results: draftResolutions, used: usedSubCharges } = resolveAll(draftLineItems);
 
     const segmentMatchSets = segmentPools.map(pool => matchExistingItems(draftResolutions, pool));
@@ -791,16 +789,14 @@ exports.main = async (event, callback) => {
     // A line is ramped if the existing order quoted it period by period.
     // One that only appears once, spanning the whole term, stays a single
     // full-span line — that is how the zero-quantity catalog lines are
-    // carried today and splitting them would just pad the order. A line the
-    // existing order has no counterpart for at all is ramped only if it is
-    // billable, so it participates in the agreed uplift.
-    const rampedLine = draftResolutions.map((resolution, index) => {
+    // carried today and splitting them would just pad the order.
+    //
+    // A line the existing order has no counterpart for at all is never
+    // ramped: it is either a catalog placeholder or a charge the quote does
+    // not carry, and both come through at zero quantity spanning the term.
+    const rampedLine = draftResolutions.map((_, index) => {
       if (!isMultiSegment) return false;
-      if (segmentMatchSets.some(set => set.matches[index].item)) return true;
-      if (fullSpanMatchSet.matches[index].item) return false;
-      const { item, charge } = resolution;
-      const quantity = charge && charge.quantity != null ? charge.quantity : (item.quantity || 0);
-      return quantity > 0;
+      return segmentMatchSets.some(set => set.matches[index].item);
     });
 
     // The match that establishes the line's identity: period one for a
@@ -828,32 +824,33 @@ exports.main = async (event, callback) => {
     // consolidated onto fewer lines. Those charges are still live on the
     // subscription, so the draft keeps offering them.
     //
-    // Building them anyway does not reproduce the quote, it writes a new
-    // and much larger one — on ORD-WD9TZMR it would have added ten lines
-    // and 1,685 seats to a 790-seat order. So a BILLABLE draft line that
-    // matches nothing anywhere in the existing order is left out, and
-    // named in the log so a genuine omission is still visible.
+    // Building them at their draft quantity does not reproduce the quote,
+    // it writes a new and much larger one — on ORD-WD9TZMR that was ten
+    // extra lines and 1,685 seats on top of a 790-seat order.
     //
-    // Zero-quantity lines are kept regardless: they are catalog
-    // placeholders, they carry no value, and the existing order carries
-    // them too.
+    // They are zeroed rather than removed, because a plan is all or
+    // nothing: drop some of its charges and the API rejects the whole
+    // order with "charges ... from plan id ... are missing in order". A
+    // quantity of zero adds no value, keeps every plan complete, and is
+    // exactly how the existing order already carries the catalog lines
+    // nobody bought.
     // ==================================================
     const draftLineQuantity = ({ item, charge }) =>
       (charge && charge.quantity != null) ? charge.quantity : (item.quantity || 0);
 
-    const droppedLines = [];
-    let droppedQuantity = 0;
-    const keepLine = draftResolutions.map((resolution, index) => {
+    const zeroedLines = [];
+    let zeroedQuantity = 0;
+    const notOnQuote = draftResolutions.map((resolution, index) => {
       const matchedTheQuote = segmentMatchSets.some(set => set.matches[index].item)
         || !!fullSpanMatchSet.matches[index].item;
-      if (matchedTheQuote) return true;
+      if (matchedTheQuote) return false;
 
       const quantity = draftLineQuantity(resolution);
-      if (quantity <= 0) return true;
+      if (quantity <= 0) return false;
 
-      droppedLines.push(`${resolution.item.chargeId}(qty ${quantity})`);
-      droppedQuantity += quantity;
-      return false;
+      zeroedLines.push(`${resolution.item.chargeId}(${quantity})`);
+      zeroedQuantity += quantity;
+      return true;
     });
 
     // A cross-charge match hands back the subscription charge the draft
@@ -928,12 +925,15 @@ exports.main = async (event, callback) => {
 
       // Quantity can be renegotiated per period, so a ramped line takes it
       // from that period's own existing line before falling back to the
-      // subscription charge.
-      const quantity = (isRamped && existingItem && existingItem.quantity != null)
-        ? existingItem.quantity
-        : (charge && charge.quantity != null
-          ? charge.quantity
-          : (draftItem.quantity || 0));
+      // subscription charge. A charge the quote does not carry is held at
+      // zero rather than removed, to keep its plan complete.
+      const quantity = notOnQuote[index]
+        ? 0
+        : ((isRamped && existingItem && existingItem.quantity != null)
+          ? existingItem.quantity
+          : (charge && charge.quantity != null
+            ? charge.quantity
+            : (draftItem.quantity || 0)));
 
       // The draft defaults the tier attribute (e.g. it emits "Independent"
       // where the customer is on "Gov > 930"), and the attribute drives the
@@ -1061,7 +1061,6 @@ exports.main = async (event, callback) => {
     let loggedLines = 0;
     draftResolutions.forEach((resolution, index) => {
       const { item: draftItem, via } = resolution;
-      if (!keepLine[index]) return;
       if (!resolution.charge) unresolvedCharges.push(draftItem.chargeId);
 
       const plan = rampedLine[index]
@@ -1099,9 +1098,7 @@ exports.main = async (event, callback) => {
       console.log(`${zeroQuantityLines.length} zero-quantity line(s) carried through: ${zeroQuantityLines.slice(0, 6).join(', ')}${zeroQuantityLines.length > 6 ? ` (+${zeroQuantityLines.length - 6})` : ''}`);
     }
     if (isMultiSegment) {
-      segmentSummaries.forEach((summary, k) => {
-        console.log(`Period ${k + 1} (${formatDate(targetWindows[k].start)} -> ${formatDate(targetWindows[k].end)}): ${summary.lines} line(s) qty=${summary.quantity} value~${Math.round(summary.value)}`);
-      });
+      console.log(`Periods: ${segmentSummaries.map((s, k) => `p${k + 1} ${s.lines}ln qty=${s.quantity} ~${Math.round(s.value)}`).join(' | ')}`);
     }
     for (const note of fullSpanMatchSet.cohortNotes) {
       console.log(`Cohort swap — ${note}`);
@@ -1114,16 +1111,15 @@ exports.main = async (event, callback) => {
       throw new Error(`Rebuild produced 0 line items — refusing to create order. draftItems=${draftLineItems.length} subscriptionCharges=${subscriptionCharges.length}`);
     }
 
-    const keptLineCount = keepLine.filter(Boolean).length;
     const expectedLineCount = rampedLine.reduce(
-      (sum, ramped, index) => keepLine[index] ? sum + (ramped ? segments.length : 1) : sum, 0);
+      (sum, ramped) => sum + (ramped ? segments.length : 1), 0);
     if (mergedLineItems.length !== expectedLineCount) {
-      throw new Error(`Line item count mismatch: built ${mergedLineItems.length}, expected ${expectedLineCount} from ${keptLineCount} of ${draftLineItems.length} draft items across ${segments.length} period(s)`);
+      throw new Error(`Line item count mismatch: built ${mergedLineItems.length}, expected ${expectedLineCount} from ${draftLineItems.length} draft items across ${segments.length} period(s)`);
     }
 
-    if (droppedLines.length > 0) {
-      const shownDropped = droppedLines.slice(0, 5).join(', ');
-      console.error(`WARNING: ${droppedLines.length} billable draft line(s) totalling ${droppedQuantity} seats are not on ${existingRenewalOrderId} and were left out: ${shownDropped}${droppedLines.length > 5 ? ` (+${droppedLines.length - 5})` : ''} — the rebuild reproduces the quote; add them by hand if they should renew`);
+    if (zeroedLines.length > 0) {
+      const shown = zeroedLines.slice(0, 4).join(' ');
+      console.error(`WARNING: ${zeroedLines.length} charge(s) worth ${zeroedQuantity} seats are offered by the draft but not on ${existingRenewalOrderId} — held at qty 0: ${shown}${zeroedLines.length > 4 ? ` +${zeroedLines.length - 4}` : ''}`);
     }
 
     const missingYears = mergedLineItems.filter(item =>

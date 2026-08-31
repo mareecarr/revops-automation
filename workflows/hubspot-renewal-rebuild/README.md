@@ -105,21 +105,34 @@ That cuts both ways, and both directions have bitten:
   does not carry forward. Those charges are live right up to the subscription's
   end, so the draft keeps offering them — ten billable lines and 1,685 seats.
   A billable draft line that matches nothing anywhere in the existing order is
-  therefore left out and named in the log. Building it would not reproduce the
-  quote, it would write a new one at roughly double the value.
+  therefore **held at quantity zero** and named in the log. Building it at its
+  draft quantity would not reproduce the quote, it would write a new one at
+  roughly double the value.
 
-Zero-quantity lines are exempt from that rule: they are catalog placeholders,
-they carry no value, and the existing order carries them too.
+Zeroed, not removed: **a plan is all or nothing.** Drop some of a plan's
+charges and the API rejects the whole order —
+
+```
+400 charges CHRG-FJ0TYZK, CHRG-DZCPWQC from plan id PLAN-TG9K5EY are missing in order
+```
+
+A quantity of zero adds no value, keeps every plan complete, and is exactly
+how the existing order already carries the catalog lines nobody bought
+(ORD-WD9TZMR has fifteen of them).
 
 Warnings that do not fail the workflow: the rebuilt total drifting more than
 10% from the existing order, a created term shorter than what was built, any
 line the API repriced, a billable subscription charge with no line in the
-rebuild, billable draft lines left out because the quote does not carry them,
-and a period carrying fewer seats than the subscription's renewing charges.
+rebuild, charges zeroed because the quote does not carry them, and a period
+carrying fewer seats than the subscription's renewing charges.
 
-Logs are kept under HubSpot's 4KB ceiling: per-line output is capped at 12
-billable lines, later ramp periods are summarised rather than listed, and
-every charge list is truncated with a `(+N)` count.
+Logs are kept under HubSpot's 4KB ceiling, which counts a ~30-byte timestamp
+and level prefix on every line as well as the message. Per-line output is
+capped at 12 billable lines, periods and pools are summarised on one line each
+rather than one per period, and every charge list is truncated with a `+N`
+count. The two real orders in the fixtures come in around 2.9KB and 2.4KB with
+prefixes included; `node test/rebuild-renewal-order.test.js` does not check
+this, so re-measure if you add logging.
 
 ## Tests
 
