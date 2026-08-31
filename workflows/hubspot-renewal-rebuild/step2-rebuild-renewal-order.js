@@ -297,6 +297,26 @@ exports.main = async (event, callback) => {
     const existingLineItems = existingOrder.lineItems || [];
     console.log(`${subscriptionSummary} | order ${existingOrder.status} lines=${existingLineItems.length} total=${existingOrder.totalAmount} oppty=${existingOrder.sfdcOpportunityId}`);
 
+    // ==================================================
+    // IS THERE STILL ANYTHING TO REBUILD?
+    //
+    // The order has to be the renewal of the subscription this run was
+    // handed. When it is not, the order has already been executed:
+    // executing a renewal creates the NEXT subscription, the workflow gets
+    // re-enrolled against that one, and draftRenewal starts proposing the
+    // term after the one the order quoted.
+    //
+    // Rebuilding then prices a future term off a quote that has already
+    // been signed — and would post a real order for it. Stop here, before
+    // spending the draftRenewal call, and say plainly what happened rather
+    // than leaving the date guard further down to report it as a term
+    // mismatch.
+    // ==================================================
+    const orderRenewsSubscriptionId = existingOrder.renewalForSubscriptionId;
+    if (orderRenewsSubscriptionId && orderRenewsSubscriptionId !== subscriptionId) {
+      throw new Error(`${existingRenewalOrderId} renews ${orderRenewsSubscriptionId}, but this run was given ${subscriptionId} — the order has already been executed and ${subscriptionId} is the subscription it created (state ${subscription.state}). Nothing to rebuild.`);
+    }
+
     const newDraftResponse = await axios.get(
       `${API_BASE}/subscriptions/${subscriptionId}/draftRenewal`,
       { headers: authHeaders, timeout: READ_TIMEOUT }
@@ -370,7 +390,16 @@ exports.main = async (event, callback) => {
       ? (newOrder.startDate - existingOrder.startDate)
       : 0;
     if (Math.abs(dateShift) > MAX_START_SHIFT_SECONDS) {
-      throw new Error(`Fresh draft starts ${formatDate(newOrder.startDate)} but existing order ${existingRenewalOrderId} starts ${formatDate(existingOrder.startDate)} (${Math.round(dateShift / 86400)}d apart) — refusing to reuse its per-period pricing on a different term.`);
+      // A draft starting at or after the existing order's own end date is
+      // the already-executed case: the term this order quoted has been and
+      // gone, and the draft is offering the one after it. Say so, rather
+      // than reporting it as an unexplained date gap.
+      const alreadyRenewed = existingOrder.endDate != null
+        && newOrder.startDate != null
+        && newOrder.startDate >= existingOrder.endDate;
+      throw new Error(alreadyRenewed
+        ? `Fresh draft starts ${formatDate(newOrder.startDate)}, at or after the end of the term ${existingRenewalOrderId} quotes (${formatDate(existingOrder.startDate)} to ${formatDate(existingOrder.endDate)}) — that term has already been renewed, so there is nothing to rebuild.`
+        : `Fresh draft starts ${formatDate(newOrder.startDate)} but existing order ${existingRenewalOrderId} starts ${formatDate(existingOrder.startDate)} (${Math.round(dateShift / 86400)}d apart) — refusing to reuse its per-period pricing on a different term.`);
     }
 
     const targetWindows = segments.map(seg => ({

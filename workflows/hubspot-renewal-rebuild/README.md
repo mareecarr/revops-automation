@@ -75,6 +75,14 @@ path it always did — the payload it produces is unchanged.
 
 Step 2 refuses to create an order rather than create a wrong one:
 
+- the order renews a **different subscription** than the one the run was given.
+  Executing a renewal creates the next subscription and the workflow is
+  re-enrolled against that one, while the HubSpot order record can still point
+  at the order that was executed. `draftRenewal` then offers the term *after*
+  the one the order quotes, so rebuilding would price a future term off a
+  signed quote. Checked before the `draftRenewal` call, so it costs nothing.
+  Step 1 folds the same check into `eligible_for_rebuild`
+
 - no line items built, or a count that does not match one line per draft item
   per period
 - a billable line on the existing order whose window falls outside every ramp

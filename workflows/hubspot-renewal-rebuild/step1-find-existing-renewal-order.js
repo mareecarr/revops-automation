@@ -100,12 +100,27 @@ exports.main = async (event, callback) => {
     // ==================================================
     const status = order.status || '';
     const isDraft = status === 'DRAFT';
-    const eligibleForRebuild = isDraft;
+
+    // Executing a renewal creates the next subscription, and the workflow is
+    // then re-enrolled against that one — but the HubSpot order record can
+    // still point at this order. When the order renews some other
+    // subscription, it has already been executed and there is nothing left
+    // to rebuild.
+    const renewsThisSubscription = !order.renewalForSubscriptionId
+      || order.renewalForSubscriptionId === subscriptionId;
+
+    const eligibleForRebuild = isDraft && renewsThisSubscription;
 
     console.log('==================================================');
     console.log('ORDER VALIDATION');
     console.log('==================================================');
-    console.log({ status, isDraft, eligibleForRebuild });
+    console.log({ status, isDraft, renewsThisSubscription, eligibleForRebuild });
+
+    if (!renewsThisSubscription) {
+      console.log(
+        `${renewalOrderId} renews ${order.renewalForSubscriptionId}, not ${subscriptionId} — already executed, nothing to rebuild`
+      );
+    }
 
     // ==================================================
     // IMPORTANT CONTEXT FOR NEXT STEPS

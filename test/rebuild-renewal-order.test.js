@@ -27,7 +27,8 @@ const { P1, P2, END } = fixtures;
 
 const round2 = (value) => Math.round(value * 100) / 100;
 
-const runStep2 = async ({ subscription, existingOrder, draftRenewal }) => {
+const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId }) => {
+  const enrolledSubscriptionId = subscriptionId || subscription.id;
   let posted = null;
   let createdOrder = null;
 
@@ -62,7 +63,7 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal }) => {
     step2.main(
       {
         inputFields: {
-          subskribe_subscription_id: 'SUB-N7YVJCT',
+          subskribe_subscription_id: enrolledSubscriptionId,
           renewal_order_id: existingOrder.id
         }
       },
@@ -446,6 +447,56 @@ test('every draft line survives, so no plan is left half-represented', async () 
   const zeroQuantity = posted.lineItems.filter(i => i.quantity === 0);
   assert.strictEqual(zeroQuantity.length, 31);
   assert.ok(zeroQuantity.every(i => i.effectiveDate === P1 && i.endDate === END));
+});
+
+// ==================================================
+// AN ORDER THAT HAS ALREADY BEEN EXECUTED
+//
+// Executing ORD-39HY7JN created SUB-TGMHNCY and the workflow was re-enrolled
+// against that. draftRenewal then offers the term AFTER the one the order
+// quotes, so rebuilding would price a future term off a signed quote.
+// ==================================================
+test('an order that renews a different subscription is refused', async () => {
+  const { posted, output } = await runStep2({
+    subscription: { ...fixtures.buildRealSubscription(), id: 'SUB-TGMHNCY', state: 'PENDING' },
+    existingOrder: fixtures.buildExistingTwoYearOrder(),
+    draftRenewal: fixtures.buildDraftRenewal(),
+    subscriptionId: 'SUB-TGMHNCY'
+  });
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.match(output.error_message,
+    /ORD-39HY7JN renews SUB-N7YVJCT, but this run was given SUB-TGMHNCY .* already been executed .* Nothing to rebuild/);
+});
+
+test('the already-executed check runs before the draftRenewal call', async () => {
+  const { output } = await runStep2({
+    subscription: { ...fixtures.buildRealSubscription(), id: 'SUB-TGMHNCY' },
+    existingOrder: fixtures.buildExistingTwoYearOrder(),
+    draftRenewal: fixtures.buildDraftRenewal(),
+    subscriptionId: 'SUB-TGMHNCY'
+  });
+
+  assert.strictEqual(output.new_order_created, false);
+  const fetched = axiosStub.__calls().map(c => c.url);
+  assert.ok(!fetched.some(u => u.endsWith('/draftRenewal')),
+    `should not have spent the draftRenewal round trip, called: ${fetched.join(', ')}`);
+});
+
+test('a draft offering the term after the quote says the term is already renewed', async () => {
+  // Same shape, but with the order's own subscription link absent, so the
+  // date guard is what catches it.
+  const existingOrder = fixtures.buildExistingTwoYearOrder();
+  delete existingOrder.renewalForSubscriptionId;
+
+  const { posted, output } = await runStep2({
+    subscription: fixtures.buildRealSubscription(),
+    existingOrder,
+    draftRenewal: fixtures.buildDraftRenewal({ startDate: END, endDate: END + 31536000 })
+  });
+
+  assert.strictEqual(posted, null);
+  assert.match(output.error_message, /that term has already been renewed, so there is nothing to rebuild/);
 });
 
 // ==================================================
