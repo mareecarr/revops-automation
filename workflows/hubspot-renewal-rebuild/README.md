@@ -13,7 +13,73 @@ commercial terms.
 | 4 | `step4-force-hubspot-sync.js` | Forces the Subskribe → HubSpot order sync |
 
 Each file is pasted whole into its HubSpot action. `SubskribeAPIKey` and
-`API_KEY` come from the action's secrets; the entity id is hard-coded.
+`API_KEY` come from the action's secrets.
+
+## Business units
+
+One set of scripts serves every unit. The workflow picks one with a
+`business_unit` input field; omitting it defaults to `EP`, so an existing
+workflow keeps working untouched.
+
+| Unit | Entity | Notes |
+| --- | --- | --- |
+| `EP` | `ENT-MNJ0N5D` | Education Perfect. Rate-card priced, multi-year ramps common |
+| `EA` | `ENT-H5MFM0T` | Essential Assessment. No price attributes, single period |
+
+To point a workflow at a unit, add a **text input field** named
+`business_unit` to each custom code action and set it to the literal `EP` or
+`EA`. The lookup is case-insensitive and trims whitespace; an unrecognised
+value fails loudly rather than falling back to a default, so a typo can't
+silently create an order against the wrong entity.
+
+The `BUSINESS_UNITS` map at the top of each file holds everything that is
+genuinely unit-specific — the entity id, the HubSpot Orders object type
+(step 1), and the name and label of the per-line custom field the unit treats
+as required. Everything else (plans, charges, attributes, prices, discounts,
+ramp structure) is discovered at runtime from the order and the subscription,
+so adding a unit means adding an entry, not writing code.
+
+Essential Assessment exercises paths EP never reaches, which is why it has its
+own fixture:
+
+- **No `attributeReferences` at all.** EA is not rate-card priced — the sector
+  lives in the choice of plan ("EA Products (2026) Independent" vs
+  "… Government + Religious"), not in a price attribute. Every
+  `buildAttributeKey()` comes back empty, so the attribute-based matching
+  tiers can no longer discriminate and only the subscription charge link,
+  `chargeId` and quantity carry the match. That is fine on three-charge orders;
+  it would be weaker on large ones.
+- **Non-numeric Year Groups.** `P/F/K; 1; 2; 3; 4; 5; 6` is what caught the
+  years normaliser rewriting the quote's own wording. Normalisation is for
+  comparison only; the value is written back exactly as the source had it.
+- Single period, `RENEWAL` rather than `ADD` actions, and a `taxEstimate` field
+  EP orders do not carry.
+
+### EA renews onto a deprecated plan, and the rebuild cannot fix that
+
+No `replacementPlanIds` are configured on any EA plan. So `draftRenewal` for
+SUB-N0JCC5Q proposes **PLAN-T7N6194** — the deprecated 2025 plan — carrying the
+subscription forward at its own negotiated price rather than re-versioning onto
+the 2026 plans. The rebuild reproduces the quote on whatever plan the draft
+proposes; it does not migrate plans, and it has no way to know that
+PLAN-46REVQW and PLAN-YYEMQ4K supersede PLAN-T7N6194.
+
+Contrast EP, where replacement plans *are* configured: its swapped lines carry
+`replacedPlanId: "PLAN-CMJB619"`, which is what drives the cross-charge
+matching passes.
+
+The catch for EA is that the 2026 catalog splits by sector into two plans
+(Independent and Government + Religious). Subskribe's plan replacement is
+per-plan, not per-account, so a single `replacementPlanIds` on PLAN-T7N6194
+cannot serve both — which is probably why it is unset.
+
+**Decided: leave it.** EA renewals rebuild on whatever plan the draft
+proposes, deprecated or not, and a rep moves one to 2026 pricing by hand when
+it matters. Migrating plans automatically was considered and rejected: it would
+need a sector signal available at runtime (nothing on the order, subscription
+or account carries one) plus an explicit old-charge to new-charge mapping, and
+it would change this tool's job from *reproduce the quote* to *migrate the
+quote*. Don't add it without fresh sign-off and real examples.
 
 ## What step 2 has to reconcile
 

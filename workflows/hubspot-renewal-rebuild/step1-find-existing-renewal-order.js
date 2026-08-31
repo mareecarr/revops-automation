@@ -4,12 +4,39 @@ exports.main = async (event, callback) => {
 
   try {
     // ==================================================
-    // CONFIG
+    // BUSINESS UNITS
+    //
+    // One set of scripts serves every business unit. The HubSpot workflow
+    // picks one with a `business_unit` input field; omitting it defaults to
+    // EP, so an existing workflow keeps working without being touched.
+    //
+    // Only genuinely unit-specific values belong here. Everything else --
+    // plans, charges, attributes, prices, discounts -- is discovered at
+    // runtime from the order and the subscription, so a new unit needs no
+    // code beyond its entry.
     // ==================================================
+    const BUSINESS_UNITS = {
+      EP: {
+        name: 'Education Perfect',
+        entityId: 'ENT-MNJ0N5D',
+        orderObjectType: '2-21331974'
+      },
+      EA: {
+        name: 'Essential Assessment',
+        entityId: 'ENT-H5MFM0T',
+        orderObjectType: '2-21331974'
+      }
+    };
+    const unitKey = String(event.inputFields.business_unit || 'EP').trim().toUpperCase();
+    const unit = BUSINESS_UNITS[unitKey];
+    if (!unit) {
+      throw new Error(`Unknown business_unit "${unitKey}" — expected one of ${Object.keys(BUSINESS_UNITS).join(', ')}`);
+    }
+
     const HUBSPOT_ACCESS_TOKEN = process.env.API_KEY;
     const SUBSKRIBE_API_KEY = process.env.SubskribeAPIKey;
-    const ENTITY_ID = 'ENT-MNJ0N5D';
-    const ORDER_OBJECT_TYPE = '2-21331974';
+    const ENTITY_ID = unit.entityId;
+    const ORDER_OBJECT_TYPE = unit.orderObjectType;
 
     // ==================================================
     // INPUT
@@ -21,7 +48,7 @@ exports.main = async (event, callback) => {
     }
 
     console.log('==================================================');
-    console.log('STEP 1 — FIND EXISTING RENEWAL ORDER');
+    console.log(`STEP 1 — FIND EXISTING RENEWAL ORDER (${unitKey})`);
     console.log('==================================================');
     console.log('Subscription ID:', subscriptionId);
 
