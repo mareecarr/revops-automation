@@ -260,7 +260,9 @@ test('a renewal for a completely different term is refused', async () => {
 
   assert.strictEqual(posted, null, 'nothing should be created');
   assert.strictEqual(output.new_order_created, false);
-  assert.match(output.error_message, /refusing to reuse its per-period pricing/);
+  assert.strictEqual(output.new_order_status, 'MANUAL');
+  assert.strictEqual(output.needs_manual_rebuild, true);
+  assert.match(output.error_message, /Manual rebuild needed — .*per-period pricing cannot be reused/);
 });
 
 test('a billable line outside every ramp period stops the rebuild', async () => {
@@ -672,6 +674,84 @@ test('quoted lines missing from the draft are named in the error', async () => {
   assert.match(output.error_message, /CHRG-NX6XC3K\(100\)/);
   assert.match(output.error_message, /CHRG-YJ6G27N\(142\)/);
   assert.match(output.error_message, /CHRG-69JTX8J\(72\)/);
+});
+
+// ==================================================
+// TELLING A HAND-OFF APART FROM A FAULT
+// ==================================================
+test('an order needing a rep is MANUAL, not ERROR', async () => {
+  const { output } = await runStep2(dilworthCase({
+    draftRenewal: dilworth.buildDraftRenewal({
+      omitCharges: ['CHRG-NX6XC3K', 'CHRG-YJ6G27N', 'CHRG-69JTX8J']
+    })
+  }));
+
+  assert.strictEqual(output.new_order_status, 'MANUAL');
+  assert.strictEqual(output.needs_manual_rebuild, true);
+  assert.match(output.error_message, /^Manual rebuild needed — /,
+    'the message must lead with the action, not read like a crash');
+});
+
+test('an order already executed is SKIPPED — no action, no alert', async () => {
+  const { output } = await runStep2({
+    subscription: { ...fixtures.buildRealSubscription(), id: 'SUB-TGMHNCY', state: 'PENDING' },
+    existingOrder: fixtures.buildExistingTwoYearOrder(),
+    draftRenewal: fixtures.buildDraftRenewal(),
+    subscriptionId: 'SUB-TGMHNCY'
+  });
+
+  assert.strictEqual(output.new_order_status, 'SKIPPED');
+  assert.strictEqual(output.needs_manual_rebuild, false);
+  assert.doesNotMatch(output.error_message, /Manual rebuild needed/);
+});
+
+test('a genuine fault is still ERROR', async () => {
+  const { output } = await runStep2(eaCase({ businessUnit: 'XX' }));
+
+  assert.strictEqual(output.new_order_status, 'ERROR');
+  assert.strictEqual(output.needs_manual_rebuild, false);
+});
+
+test('a Subskribe failure is ERROR, not a hand-off', async () => {
+  const testCase = dilworthCase();
+  const apiFailure = Object.assign(new Error('Request failed with status code 400'), {
+    response: { status: 400, data: { code: 400, message: 'charges missing in order' } }
+  });
+
+  let output;
+  axiosStub.__reset({
+    get: async (url) => {
+      if (url.endsWith('/draftRenewal')) return { data: testCase.draftRenewal };
+      if (url.includes('/subscriptions/')) return { data: testCase.subscription };
+      return { data: testCase.existingOrder };
+    },
+    post: async () => { throw apiFailure; }
+  });
+  const realError = console.error;
+  const realLog = console.log;
+  console.error = () => {};
+  console.log = () => {};
+  try {
+    output = await new Promise(r => step2.main({
+      inputFields: {
+        subskribe_subscription_id: 'SUB-EXQ9N8M',
+        renewal_order_id: 'ORD-7V4N727'
+      }
+    }, x => r(x.outputFields)));
+  } finally {
+    console.error = realError;
+    console.log = realLog;
+  }
+
+  assert.strictEqual(output.new_order_status, 'ERROR');
+  assert.strictEqual(output.needs_manual_rebuild, false);
+  assert.match(output.error_message, /Subskribe 400/);
+});
+
+test('a successful rebuild needs no manual work', async () => {
+  const { output } = await runStep2(dilworthCase());
+  assert.strictEqual(output.new_order_status, 'DRAFT');
+  assert.strictEqual(output.needs_manual_rebuild, false);
 });
 
 // ==================================================

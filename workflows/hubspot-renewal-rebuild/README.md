@@ -137,6 +137,32 @@ and the later periods are ramp continuations of that line.
 A plain one-year order collapses to exactly one period and takes the same code
 path it always did — the payload it produces is unchanged.
 
+## Outcomes
+
+Step 2 reports one of four outcomes on `new_order_status`, because "no order
+was created" is several different things and a workflow that treats them alike
+will page someone about routine work.
+
+| `new_order_status` | Meaning | Who acts |
+| --- | --- | --- |
+| `DRAFT` | Order created | Nobody — review and send |
+| `SKIPPED` | Nothing to do. The order has already been executed and the subscription has moved on | Nobody |
+| `MANUAL` | Cannot be rebuilt automatically. The quote asks for something the fresh draft cannot supply, or the order's shape is beyond what this step will guess at. **Nothing is broken** | A rep, by hand |
+| `ERROR` | Something is genuinely wrong: the API failed, the action is wired up wrongly, or an internal invariant broke | Whoever maintains this |
+
+`needs_manual_rebuild` is a boolean carrying the same signal as `MANUAL`, for a
+one-click HubSpot branch. `error_message` carries the reason in every case, and
+a `MANUAL` one always begins `Manual rebuild needed — `, so it reads as a
+hand-off in Slack rather than a crash.
+
+**Only `ERROR` deserves an alert.** `SKIPPED` fires routinely — every time an
+order is executed and the workflow re-enrols against the subscription it
+created. Untagged throws default to `ERROR`, so a genuine fault is never
+quietly downgraded to routine.
+
+There is also a fifth case with no outputs at all: HubSpot killing the action
+at its 20-second limit, so `callback` never fires. Give the branch a fallback.
+
 ## Guard rails
 
 Step 2 refuses to create an order rather than create a wrong one:

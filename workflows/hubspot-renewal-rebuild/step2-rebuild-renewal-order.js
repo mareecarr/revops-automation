@@ -38,6 +38,32 @@ exports.main = async (event, callback) => {
       throw new Error(`Unknown business_unit "${unitKey}" — expected one of ${Object.keys(BUSINESS_UNITS).join(', ')}`);
     }
 
+    // ==================================================
+    // WHEN A REBUILD DOES NOT HAPPEN
+    //
+    // Not creating an order is three different things, and a workflow that
+    // treats them alike will page someone about routine work:
+    //
+    //   SKIPPED  Nothing to do. The order has already been executed and the
+    //            subscription has moved on. Expected, and common.
+    //   MANUAL   This order cannot be rebuilt automatically. The quote asks
+    //            for something the fresh draft cannot supply, or its shape
+    //            is beyond what this step will guess at. Nothing is broken —
+    //            a rep needs to build it by hand.
+    //   ERROR    Something is actually wrong: the API failed, the action is
+    //            wired up wrongly, or an internal invariant broke.
+    //
+    // Only ERROR deserves an alert. Untagged throws default to ERROR, so a
+    // genuine fault is never quietly downgraded to routine.
+    // ==================================================
+    const OUTCOME = { SKIPPED: 'SKIPPED', MANUAL: 'MANUAL' };
+    const refuse = (outcome, message) => {
+      const error = new Error(
+        outcome === OUTCOME.MANUAL ? `Manual rebuild needed — ${message}` : message);
+      error.rebuildOutcome = outcome;
+      return error;
+    };
+
     const SUBSKRIBE_API_KEY = process.env.SubskribeAPIKey;
     const ENTITY_ID = unit.entityId;
     const API_BASE = 'https://api.app.subskribe.com';
@@ -351,7 +377,7 @@ exports.main = async (event, callback) => {
     // ==================================================
     const orderRenewsSubscriptionId = existingOrder.renewalForSubscriptionId;
     if (orderRenewsSubscriptionId && orderRenewsSubscriptionId !== subscriptionId) {
-      throw new Error(`${existingRenewalOrderId} renews ${orderRenewsSubscriptionId}, but this run was given ${subscriptionId} — the order has already been executed and ${subscriptionId} is the subscription it created (state ${subscription.state}). Nothing to rebuild.`);
+      throw refuse(OUTCOME.SKIPPED, `${existingRenewalOrderId} renews ${orderRenewsSubscriptionId}, but this run was given ${subscriptionId} — the order has already been executed and ${subscriptionId} is the subscription it created (state ${subscription.state}). Nothing to rebuild.`);
     }
 
     const newDraftResponse = await axios.get(
@@ -408,7 +434,7 @@ exports.main = async (event, callback) => {
     const isMultiSegment = segments.length > 1;
 
     if (segments.length > MAX_SEGMENTS) {
-      throw new Error(`Existing order ${existingRenewalOrderId} resolves to ${segments.length} ramp periods (max ${MAX_SEGMENTS}) — refusing to rebuild; this one needs to be built manually.`);
+      throw refuse(OUTCOME.MANUAL, `${existingRenewalOrderId} resolves to ${segments.length} ramp periods (max ${MAX_SEGMENTS}) — refusing to rebuild; this one needs to be built manually.`);
     }
 
     // The whole per-period approach rests on the draft being a single
@@ -417,7 +443,7 @@ exports.main = async (event, callback) => {
     // every line — stop instead of quietly quoting twice the term.
     const draftWindows = [...new Set(draftLineItems.map(i => `${i.effectiveDate}|${i.endDate}`))];
     if (draftWindows.length > 1) {
-      throw new Error(`Fresh draft for ${subscriptionId} spans ${draftWindows.length} distinct date windows (${draftWindows.slice(0, 3).join(' , ')}) — this step expects a single-period draft to replicate across the existing order's ramp periods; refusing to rebuild.`);
+      throw refuse(OUTCOME.MANUAL, `the fresh draft for ${subscriptionId} spans ${draftWindows.length} distinct date windows (${draftWindows.slice(0, 3).join(' , ')}) — this step expects a single-period draft to replicate across the existing order's ramp periods; refusing to rebuild.`);
     }
 
     // Every built period is placed relative to the draft's start, so a
@@ -434,9 +460,9 @@ exports.main = async (event, callback) => {
       const alreadyRenewed = existingOrder.endDate != null
         && newOrder.startDate != null
         && newOrder.startDate >= existingOrder.endDate;
-      throw new Error(alreadyRenewed
-        ? `Fresh draft starts ${formatDate(newOrder.startDate)}, at or after the end of the term ${existingRenewalOrderId} quotes (${formatDate(existingOrder.startDate)} to ${formatDate(existingOrder.endDate)}) — that term has already been renewed, so there is nothing to rebuild.`
-        : `Fresh draft starts ${formatDate(newOrder.startDate)} but existing order ${existingRenewalOrderId} starts ${formatDate(existingOrder.startDate)} (${Math.round(dateShift / 86400)}d apart) — refusing to reuse its per-period pricing on a different term.`);
+      throw alreadyRenewed
+        ? refuse(OUTCOME.SKIPPED, `Fresh draft starts ${formatDate(newOrder.startDate)}, at or after the end of the term ${existingRenewalOrderId} quotes (${formatDate(existingOrder.startDate)} to ${formatDate(existingOrder.endDate)}) — that term has already been renewed, so there is nothing to rebuild.`)
+        : refuse(OUTCOME.MANUAL, `the fresh draft starts ${formatDate(newOrder.startDate)} but ${existingRenewalOrderId} starts ${formatDate(existingOrder.startDate)} (${Math.round(dateShift / 86400)}d apart), so its per-period pricing cannot be reused on this term.`);
     }
 
     const targetWindows = segments.map(seg => ({
@@ -472,7 +498,7 @@ exports.main = async (event, callback) => {
       const strays = existingLineItems.filter(i => !pooled.has(i));
       const billableStrays = strays.filter(i => i.quantity > 0);
       if (billableStrays.length > 0) {
-        throw new Error(`${billableStrays.length} billable line(s) on ${existingRenewalOrderId} fall outside every ramp period (${billableStrays.map(i => `${i.chargeId} ${formatDate(i.effectiveDate)}->${formatDate(i.endDate)}`).slice(0, 3).join(', ')}) — refusing to rebuild and drop their value.`);
+        throw refuse(OUTCOME.MANUAL, `${billableStrays.length} billable line(s) on ${existingRenewalOrderId} fall outside every ramp period (${billableStrays.map(i => `${i.chargeId} ${formatDate(i.effectiveDate)}->${formatDate(i.endDate)}`).slice(0, 3).join(', ')}) — refusing to rebuild and drop their value.`);
       }
       if (strays.length > 0) {
         console.log(`${strays.length} zero-quantity existing line(s) outside every ramp period — ignored`);
@@ -1196,7 +1222,7 @@ exports.main = async (event, callback) => {
     // GUARD RAILS
     // ==================================================
     if (mergedLineItems.length === 0) {
-      throw new Error(`Rebuild produced 0 line items — refusing to create order. draftItems=${draftLineItems.length} subscriptionCharges=${subscriptionCharges.length}`);
+      throw refuse(OUTCOME.MANUAL, `the rebuild produced 0 line items. draftItems=${draftLineItems.length} subscriptionCharges=${subscriptionCharges.length}`);
     }
 
     const expectedLineCount = rampedLine.reduce(
@@ -1213,7 +1239,7 @@ exports.main = async (event, callback) => {
     const missingYears = mergedLineItems.filter(item =>
       item.quantity > 0 && !getYearsCustomField(item)?.value);
     if (missingYears.length > 0) {
-      throw new Error(`Missing ${unit.yearsFieldLabel} on ${missingYears.length} billable line item(s): ${missingYears.map(i => `${i.chargeId}(qty ${i.quantity})`).join(', ')}`);
+      throw refuse(OUTCOME.MANUAL, `no ${unit.yearsFieldLabel} on ${missingYears.length} billable line item(s): ${missingYears.map(i => `${i.chargeId}(qty ${i.quantity})`).join(', ')}`);
     }
 
     if (swappedLines.length > 0) {
@@ -1271,7 +1297,7 @@ exports.main = async (event, callback) => {
           .filter(i => i.quantity > 0 && !matchedExistingItems.has(i));
         const shownUnmatched = unmatchedQuoted.slice(0, 4)
           .map(i => `${i.chargeId}(${i.quantity})`).join(' ');
-        throw new Error(`Rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId}${unmatchedQuoted.length ? ` — ${unmatchedQuoted.length} quoted line(s) have no counterpart in the fresh draft: ${shownUnmatched}${unmatchedQuoted.length > 4 ? ` +${unmatchedQuoted.length - 4}` : ''}` : ' — line items were dropped'}`);
+        throw refuse(OUTCOME.MANUAL, `rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId}${unmatchedQuoted.length ? ` — ${unmatchedQuoted.length} quoted line(s) have no counterpart in the fresh draft: ${shownUnmatched}${unmatchedQuoted.length > 4 ? ` +${unmatchedQuoted.length - 4}` : ''}` : ' — line items were dropped'}`);
       }
 
       if (leanestPeriod == null || rebuiltQuantity < leanestPeriod.quantity) {
@@ -1419,6 +1445,7 @@ exports.main = async (event, callback) => {
         new_order_created: true,
         new_renewal_order_id: createdOrder.id || '',
         new_order_status: createdOrder.status || '',
+        needs_manual_rebuild: false,
         new_order_total: createdOrder.totalAmount || 0,
         error_message: '',
         renewal_for_subscription_id: subscriptionId,
@@ -1430,12 +1457,22 @@ exports.main = async (event, callback) => {
     });
 
   } catch (error) {
-    console.error('STEP 2 FAILED:', error.message);
-    if (error.response) {
-      console.error('Status:', error.response.status);
-      console.error('Response:', JSON.stringify(error.response.data));
+    // Untagged throws are genuine faults. A deliberate refusal carries its
+    // own outcome, so routine work and hand-offs to a rep do not arrive
+    // looking like something broke.
+    const outcome = error.rebuildOutcome || 'ERROR';
+
+    if (outcome === 'ERROR') {
+      console.error('STEP 2 FAILED:', error.message);
+      if (error.response) {
+        console.error('Status:', error.response.status);
+        console.error('Response:', JSON.stringify(error.response.data));
+      }
+    } else {
+      console.log(`STEP 2 ${outcome}: ${error.message}`);
     }
-    // Carried out to Slack so a failure says why, instead of showing blanks.
+
+    // Carried out to Slack so the outcome says why, instead of showing blanks.
     const errorMessage = (error.response
       ? `Subskribe ${error.response.status}: ${JSON.stringify(error.response.data)}`
       : (error.message || 'Unknown error')).slice(0, 500);
@@ -1444,7 +1481,8 @@ exports.main = async (event, callback) => {
         generated_new_draft: false,
         new_order_created: false,
         new_renewal_order_id: '',
-        new_order_status: 'ERROR',
+        new_order_status: outcome,
+        needs_manual_rebuild: outcome === 'MANUAL',
         new_order_total: 0,
         error_message: errorMessage,
         renewal_for_subscription_id: subscriptionId || '',
