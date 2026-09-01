@@ -23,6 +23,7 @@ const step2 = require('../workflows/hubspot-renewal-rebuild/step2-rebuild-renewa
 const fixtures = require('./fixtures/methodist-ladies-2year.js');
 const allSaints = require('./fixtures/all-saints-2year.js');
 const ea = require('./fixtures/essential-assessment.js');
+const dilworth = require('./fixtures/dilworth-single-period.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -600,6 +601,77 @@ test('an unknown business unit is refused', async () => {
 
   assert.strictEqual(posted, null);
   assert.match(output.error_message, /Unknown business_unit "XX" — expected one of EP, EA/);
+});
+
+// ==================================================
+// DILWORTH — A SINGLE-PERIOD ORDER QUOTED AWAY FROM ITS SUBSCRIPTION
+//
+// Every quoted quantity differs from the subscription charge behind it, and
+// one line was deliberately zeroed by the rep. The quote has to win.
+// ==================================================
+const dilworthCase = (overrides = {}) => ({
+  subscription: dilworth.buildSubscription(),
+  existingOrder: dilworth.buildExistingOrder(),
+  draftRenewal: dilworth.buildDraftRenewal(),
+  ...overrides
+});
+
+test('single-period quantities come from the quote, not the subscription', async () => {
+  const { posted, output } = await runStep2(dilworthCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+
+  // quoted -> subscription: every one of these differs.
+  const quoted = {
+    'CHRG-NX6XC3K': 100, 'CHRG-YJ6G27N': 142, 'CHRG-69JTX8J': 72,
+    'CHRG-BM3X8B8': 92, 'CHRG-EMZGKCZ': 150, 'CHRG-23MJQGV': 115,
+    'CHRG-7MCBK05': 20
+  };
+  for (const [chargeId, quantity] of Object.entries(quoted)) {
+    const [line] = linesFor(posted, chargeId);
+    assert.strictEqual(line.quantity, quantity, `${chargeId} must be the quoted ${quantity}`);
+  }
+});
+
+test('a line the rep zeroed stays at zero', async () => {
+  const { posted } = await runStep2(dilworthCase());
+
+  // The subscription charge behind it carries 109. Taking that would put
+  // 109 seats back onto a line the rep had deliberately emptied.
+  const [line] = linesFor(posted, 'CHRG-B1K66MY');
+  assert.strictEqual(line.quantity, 0);
+});
+
+test('the rebuilt Dilworth order matches the quoted seat count exactly', async () => {
+  const { posted } = await runStep2(dilworthCase());
+
+  const billable = posted.lineItems.reduce((sum, i) => sum + i.quantity, 0);
+  assert.strictEqual(billable, 691, 'the 691 quoted — not the subscription-derived 545 or 896');
+});
+
+test('a stale subscription charge link still matches on chargeId', async () => {
+  const { posted } = await runStep2(dilworthCase());
+
+  // ORD-7V4N727 points CHRG-69JTX8J at a subscription charge that no longer
+  // exists, so the uuid tier misses and chargeId has to carry it.
+  const [line] = linesFor(posted, 'CHRG-69JTX8J');
+  assert.strictEqual(line.quantity, 72);
+  assert.strictEqual(line.sellUnitPrice, 93);
+  assert.strictEqual(line.listPriceOverrideRatio, 1.25);
+});
+
+test('quoted lines missing from the draft are named in the error', async () => {
+  const { posted, output } = await runStep2(dilworthCase({
+    draftRenewal: dilworth.buildDraftRenewal({
+      omitCharges: ['CHRG-NX6XC3K', 'CHRG-YJ6G27N', 'CHRG-69JTX8J']
+    })
+  }));
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.match(output.error_message, /3 quoted line\(s\) have no counterpart in the fresh draft/);
+  assert.match(output.error_message, /CHRG-NX6XC3K\(100\)/);
+  assert.match(output.error_message, /CHRG-YJ6G27N\(142\)/);
+  assert.match(output.error_message, /CHRG-69JTX8J\(72\)/);
 });
 
 // ==================================================

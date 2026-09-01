@@ -904,6 +904,19 @@ exports.main = async (event, callback) => {
     const draftLineQuantity = ({ item, charge }) =>
       (charge && charge.quantity != null) ? charge.quantity : (item.quantity || 0);
 
+    // Every existing line some draft line claimed. A billable quoted line
+    // missing from this set is one the fresh draft has no counterpart for —
+    // the charge has been renamed beyond what the matcher can follow, or
+    // dropped from the catalog. Named in the quantity guard, because "line
+    // items were dropped" without saying which is a puzzle, not a report.
+    const matchedExistingItems = new Set();
+    segmentMatchSets.forEach(set => set.matches.forEach(m => {
+      if (m.item) matchedExistingItems.add(m.item);
+    }));
+    fullSpanMatchSet.matches.forEach(m => {
+      if (m.item) matchedExistingItems.add(m.item);
+    });
+
     const zeroedLines = [];
     let zeroedQuantity = 0;
     const notOnQuote = draftResolutions.map((resolution, index) => {
@@ -989,13 +1002,22 @@ exports.main = async (event, callback) => {
           || extractYearsData(existingItem)
           || extractYearsData(draftItem));
 
-      // Quantity can be renegotiated per period, so a ramped line takes it
-      // from that period's own existing line before falling back to the
-      // subscription charge. A charge the quote does not carry is held at
-      // zero rather than removed, to keep its plan complete.
+      // The quote decides quantity, in every period and on single-period
+      // orders alike. A renewal is routinely quoted at a different seat
+      // count from the term it renews, and the subscription charge is only
+      // a fallback for a line the quote has no counterpart for.
+      //
+      // This used to fall back to the charge on single-period orders, which
+      // silently replaced the quoted numbers with the subscription's:
+      // ORD-7V4N727 quotes 92/150/0/115/20 against charges all sitting at
+      // 109, so every line came out at 109 — including one the rep had
+      // deliberately zeroed.
+      //
+      // A charge the quote does not carry is held at zero rather than
+      // removed, to keep its plan complete.
       const quantity = notOnQuote[index]
         ? 0
-        : ((isRamped && existingItem && existingItem.quantity != null)
+        : ((existingItem && existingItem.quantity != null)
           ? existingItem.quantity
           : (charge && charge.quantity != null
             ? charge.quantity
@@ -1245,7 +1267,11 @@ exports.main = async (event, callback) => {
       console.log(`Quantity period ${k + 1}: quoted=${quotedQuantity} rebuilt=${rebuiltQuantity} subscription=${subscriptionQuantity}`);
 
       if (rebuiltQuantity < quotedQuantity) {
-        throw new Error(`Rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId} — line items were dropped`);
+        const unmatchedQuoted = existingLineItems
+          .filter(i => i.quantity > 0 && !matchedExistingItems.has(i));
+        const shownUnmatched = unmatchedQuoted.slice(0, 4)
+          .map(i => `${i.chargeId}(${i.quantity})`).join(' ');
+        throw new Error(`Rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId}${unmatchedQuoted.length ? ` — ${unmatchedQuoted.length} quoted line(s) have no counterpart in the fresh draft: ${shownUnmatched}${unmatchedQuoted.length > 4 ? ` +${unmatchedQuoted.length - 4}` : ''}` : ' — line items were dropped'}`);
       }
 
       if (leanestPeriod == null || rebuiltQuantity < leanestPeriod.quantity) {
