@@ -4,8 +4,14 @@ Two HubSpot custom code actions, run in this order in one workflow.
 
 | Step | File | Does |
 | --- | --- | --- |
-| 1 | `rebuild-order-from-details.js` | Reads the rep's free text and rebuilds the deal's draft renewal order from it |
+| 1 | `rebuild-order-from-details.js` | Reads the rep's free text and rebuilds the deal's draft renewal order from it (AUD/NZD) |
+| 1a | `rebuild-order-from-details-usd-cad.js` | The same job for the domestic USD/CAD branch |
 | 2 | `sync-order-to-hubspot.js` | Pushes the rebuilt order back onto the HubSpot record straight away |
+
+The rebuild is branched by catalogue, not by workflow: AUD/NZD and domestic
+USD/CAD are separate actions because their subject names, tiers and sectors
+differ. They share the cohort rules below — the USD/CAD file has no All
+Subjects bundle, so a cohort there is always an explicit subject line.
 
 The rebuild reads the rep's free text out of the deal's `order_details`, throws
 away the plans on the deal's draft renewal order, and rebuilds it from the
