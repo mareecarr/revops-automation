@@ -4,6 +4,6 @@
   "version": "0.0.0",
   "description": "HubSpot custom code actions for the Subskribe renewal order rebuild workflow",
   "scripts": {
-    "test": "node test/rebuild-renewal-order.test.js && node test/all-subjects-rebuild.test.js && node test/usd-cad-rebuild.test.js && node test/sync-order-to-hubspot.test.js"
+    "test": "node test/rebuild-renewal-order.test.js && node test/all-subjects-rebuild.test.js && node test/usd-cad-rebuild.test.js && node test/intl-rebuild.test.js && node test/ea-rebuild.test.js && node test/sync-order-to-hubspot.test.js"
   }
 }

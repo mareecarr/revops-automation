@@ -4,14 +4,18 @@ Two HubSpot custom code actions, run in this order in one workflow.
 
 | Step | File | Does |
 | --- | --- | --- |
-| 1 | `rebuild-order-from-details.js` | Reads the rep's free text and rebuilds the deal's draft renewal order from it (AUD/NZD) |
-| 1a | `rebuild-order-from-details-usd-cad.js` | The same job for the domestic USD/CAD branch |
+| 1 | one of the four rebuild actions below | Reads the rep's free text and rebuilds the deal's draft renewal order from it |
 | 2 | `sync-order-to-hubspot.js` | Pushes the rebuilt order back onto the HubSpot record straight away |
 
-The rebuild is branched by catalogue, not by workflow: AUD/NZD and domestic
-USD/CAD are separate actions because their subject names, tiers and sectors
-differ. They share the cohort rules below — the USD/CAD file has no All
-Subjects bundle, so a cohort there is always an explicit subject line.
+The rebuild is branched by catalogue, and the branches are routed to
+differently — by currency, by sales team, and by product:
+
+| Branch | File | Routed by | Priced by |
+| --- | --- | --- | --- |
+| AUD/NZD domestic | `rebuild-order-from-details.js` | currency | rate card (Tier + Sector) |
+| USD/CAD domestic | `rebuild-order-from-details-usd-cad.js` | currency | rate card (Tier + Sector) |
+| International | `rebuild-order-from-details-intl.js` | the international sales team, any currency | volume tiers, never rep-priced |
+| Essential Assessment | `rebuild-order-from-details-ea.js` | `school_product` | flat PER_UNIT, rep-priced |
 
 The rebuild reads the rep's free text out of the deal's `order_details`, throws
 away the plans on the deal's draft renewal order, and rebuilds it from the
@@ -70,6 +74,19 @@ Groups, which is how a rep builds it by hand. Three things follow from that:
   when the same charge is claimed twice for the *same* year group, because then
   there is no way to know which quantity and price was meant.
 
+Splitting is right where the unit price does not depend on the line's
+quantity, which is why the branches differ:
+
+| Branch | Two cohorts of one charge | Why |
+| --- | --- | --- |
+| AUD/NZD, USD/CAD | Two lines, one per cohort | A rate card price is per student, whatever the quantity |
+| International | **Merged** into one line, quantities summed and year groups combined | The charge is VOLUME-priced per line item: 120 + 90 on one line earns the 126-250 tier, two lines of 120 and 90 both sit in 1-125 and quote the school more |
+| Essential Assessment | Merged at the same price, split at different prices | Flat PER_UNIT, so splitting costs nothing — but a rep writing one price twice means one line |
+
+Every branch refuses the same thing: the same charge claimed twice for the
+same year group. Merging that would double-count the year level; splitting it
+would leave two prices for one cohort.
+
 ## Guard rails
 
 The action refuses to write, and reports on `update_error`, when the order is
@@ -116,11 +133,17 @@ the scheduled sync still picks the order up — so the workflow can carry on.
 ## Tests
 
 ```
+npm test                                     # every branch
 node test/all-subjects-rebuild.test.js       # VERBOSE=1 to see the action's own log
+node test/usd-cad-rebuild.test.js
+node test/intl-rebuild.test.js
+node test/ea-rebuild.test.js
 node test/sync-order-to-hubspot.test.js
 ```
 
-The rebuild test runs the real file with `axios` stubbed against a fixture of
-ORD-7V4N727 (Dilworth School, 2027 NZD renewal). The stub prices pass 1 off a
-fake rate card, so the two-pass discount arithmetic is checked end to end. The
-sync test covers the entity lookup, what is retried and what is not.
+Each runs the real file with `axios` stubbed. The AUD/NZD test uses a fixture
+of ORD-7V4N727 (Dilworth School, 2027 NZD renewal); the other three are
+modelled catalogues. Every stub prices pass 1 the way the real API would — off
+a rate card, a volume tier table or a flat charge amount — so the pricing
+arithmetic is checked end to end rather than just the payload shape. The sync
+test covers the entity lookup, what is retried and what is not.
