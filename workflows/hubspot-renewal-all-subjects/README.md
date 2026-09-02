@@ -1,9 +1,16 @@
 # Renewal "All Subjects" rebuild
 
-One HubSpot custom code action. It reads the rep's free text out of the deal's
-`order_details`, throws away the plans on the deal's draft renewal order, and
-rebuilds it from the newest ACTIVE year-band plans at the quantities, year
-groups, tier, sector and price the text states. The order is left in DRAFT.
+Two HubSpot custom code actions, run in this order in one workflow.
+
+| Step | File | Does |
+| --- | --- | --- |
+| 1 | `rebuild-order-from-details.js` | Reads the rep's free text and rebuilds the deal's draft renewal order from it |
+| 2 | `sync-order-to-hubspot.js` | Pushes the rebuilt order back onto the HubSpot record straight away |
+
+The rebuild reads the rep's free text out of the deal's `order_details`, throws
+away the plans on the deal's draft renewal order, and rebuilds it from the
+newest ACTIVE year-band plans at the quantities, year groups, tier, sector and
+price the text states. The order is left in DRAFT.
 
 | | |
 | --- | --- |
@@ -75,12 +82,39 @@ way than off the rate card (the one-time PER_UNIT "Decode Teacher PD" fee) go
 on at quantity 0 with no price attribution at all, since Subskribe rejects the
 order if the field is merely present on them.
 
+## The sync step
+
+Subskribe pushes orders to HubSpot on a schedule, so a freshly rebuilt order
+can sit invisible on the deal for a while. `sync-order-to-hubspot.js` forces it
+by POSTing to `/hubspot/sync/order/{id}` — the same call the "Sync Orders"
+Google Sheet made, minus everything the sheet only needed because it was a
+sheet.
+
+| | |
+| --- | --- |
+| File | `sync-order-to-hubspot.js` |
+| Input properties | `subskribe_order_id` (deal), `business_unit` (optional text, `EP` or `EA`) |
+| Secret | `SubskribeAPIKey` |
+| Outputs | `hubspot_sync_success`, `synced_order_id`, `sync_error` |
+
+The sheet looped rows, paced itself with a delay between calls, wrote a status
+back and deleted the row. A workflow action runs once per enrolled deal, so the
+loop and the bookkeeping go; the Entity column becomes the `business_unit`
+input; and the pacing becomes a retry, since HubSpot can enrol a batch of deals
+at once and no execution knows what the others are doing. A 429, a 5xx or a
+dropped connection is retried twice (2s, then 4s — the whole budget has to stay
+inside HubSpot's 20-second limit on an action); a 400 or a 404 is not, because
+it will say the same thing however often it is asked. Giving up is not fatal —
+the scheduled sync still picks the order up — so the workflow can carry on.
+
 ## Tests
 
 ```
 node test/all-subjects-rebuild.test.js       # VERBOSE=1 to see the action's own log
+node test/sync-order-to-hubspot.test.js
 ```
 
-Runs the real file with `axios` stubbed against a fixture of ORD-7V4N727
-(Dilworth School, 2027 NZD renewal). The stub prices pass 1 off a fake rate
-card, so the two-pass discount arithmetic is checked end to end.
+The rebuild test runs the real file with `axios` stubbed against a fixture of
+ORD-7V4N727 (Dilworth School, 2027 NZD renewal). The stub prices pass 1 off a
+fake rate card, so the two-pass discount arithmetic is checked end to end. The
+sync test covers the entity lookup, what is retried and what is not.
