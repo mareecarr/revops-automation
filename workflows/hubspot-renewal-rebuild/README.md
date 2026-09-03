@@ -139,23 +139,31 @@ path it always did — the payload it produces is unchanged.
 
 ## Outcomes
 
-Step 2 reports one of four outcomes on `new_order_status`, because "no order
+Step 2 reports one of five outcomes on `new_order_status`, because "no order
 was created" is several different things and a workflow that treats them alike
 will page someone about routine work.
 
 | `new_order_status` | Meaning | Who acts |
 | --- | --- | --- |
-| `DRAFT` | Order created | Nobody — review and send |
+| `DRAFT` | Order created and it reproduces the quote | Nobody — review and send |
+| `REVIEW` | Order created, but it does **not** reproduce the quote: a line came back priced away from what was agreed, or the total moved more than 10%. Steps 3 and 4 must not run | A rep, on the order that exists |
 | `SKIPPED` | Nothing to do. The order has already been executed and the subscription has moved on | Nobody |
 | `MANUAL` | Cannot be rebuilt automatically. The quote asks for something the fresh draft cannot supply, or the order's shape is beyond what this step will guess at. **Nothing is broken** | A rep, by hand |
 | `ERROR` | Something is genuinely wrong: the API failed, the action is wired up wrongly, or an internal invariant broke | Whoever maintains this |
 
-`needs_manual_rebuild` is a boolean carrying the same signal as `MANUAL`, for a
-one-click HubSpot branch. `error_message` carries the reason in every case, and
-a `MANUAL` one always begins `Manual rebuild needed — `, so it reads as a
-hand-off in Slack rather than a crash.
+`needs_manual_rebuild` is a boolean carrying the same signal as `MANUAL`, and
+`needs_review` the same signal as `REVIEW`, for one-click HubSpot branches.
+`error_message` carries the reason in every case: a `MANUAL` one always begins
+`Manual rebuild needed — ` and a `REVIEW` one `Review before sending — `, so
+both read as a hand-off in Slack rather than a crash.
 
-**Only `ERROR` deserves an alert.** `SKIPPED` fires routinely — every time an
+**Branch on `new_order_status = DRAFT` before steps 3 and 4.** They mark the
+order primary for the opportunity and sync it to HubSpot, which is exactly
+what an order that does not reproduce the quote must not have done to it.
+ORD-3YQB21H was created at 85% over quote, made primary and synced, displacing
+the correct order — on nothing but a console warning.
+
+**Only `ERROR` deserves an alert.** `REVIEW` deserves a task, not a page. `SKIPPED` fires routinely — every time an
 order is executed and the workflow re-enrols against the subscription it
 created. Untagged throws default to `ERROR`, so a genuine fault is never
 quietly downgraded to routine.
@@ -186,6 +194,8 @@ Step 2 refuses to create an order rather than create a wrong one:
 - more than 6 ramp periods, or a fresh draft that is itself already ramped
 - a renewal term more than 45 days away from the one the existing order was
   quoted for
+- more interchangeable draft lines at one seat count than the quote carries
+  there — see below
 
 ## The quote is the spec, not the subscription
 
@@ -220,17 +230,60 @@ A quantity of zero adds no value, keeps every plan complete, and is exactly
 how the existing order already carries the catalog lines nobody bought
 (ORD-WD9TZMR has fifteen of them).
 
-Warnings that do not fail the workflow: the rebuilt total drifting more than
-10% from the existing order, a created term shorter than what was built, any
-line the API repriced, a billable subscription charge with no line in the
-rebuild, charges zeroed because the quote does not carry them, and a period
-carrying fewer seats than the subscription's renewing charges.
+### One quoted line becomes one rebuilt line — never two
+
+The cohort pass pairs a set of interchangeable draft lines against a set of
+interchangeable quoted lines positionally. That is safe only while every draft
+line gets a quoted line of its own: the candidates are identical in price,
+attributes and Year Groups, so which is paired with which cannot change the
+order. Once there are **more draft lines than quoted ones** it stops being
+safe, because the pairing then decides which charge is billed and which is
+held at zero.
+
+SUB-FDGKQ1P carries three charges at 211 seats: two given away at sell 0 and
+one sold at 90. ORD-YT4NWKB quotes only the sold one, at 94.50 — $19,939.50,
+most of the order. The fresh draft re-versions the free pair onto a new plan,
+so two draft lines arrive at 211 seats with one quoted line between them. The
+surplus line used to be handed a *copy* of the same quoted line, so both were
+billed at 94.50 and neither was zeroed. ORD-3YQB21H came out at $43,839.19
+against a $23,706.50 quote, with "7-10 Religious Education" and "Arts" each
+charged $94.50 for the same 211 seats.
+
+Which of the two renews is a commercial decision, so this is now `MANUAL` and
+the message names the competing charges.
+
+### The catalog can move under a line the rebuild cannot price
+
+A line whose attributes had to be recovered from the quote takes the
+catalog path: placeholder prices plus the version-independent discount
+percentage, and the API prices it from the current rate card. That is right
+while the rate card has not moved and wrong the moment it has, and there is no
+way to tell at build time — the draft priced itself on the wrong attribute row,
+so its base is unusable, and the correct row's price is not knowable until
+after the order exists.
+
+ORD-YT4NWKB prices three lines at list 39 / sell 37.67 on Catholic + Core.
+Catholic + Core has since moved 39 → 41, so the same 3.41% discount came back
+as **$39.60** rather than $37.67.
+
+So each created line is compared against the price the quote agreed, not just
+against what was sent, and the order is reported `REVIEW` when they differ.
+Three lines moving 5% shifted the total by 0.8% — the 10% drift check could
+never have seen it. Correcting the price automatically would need the new
+rate card at build time; a plan lookup could supply it, and nothing here
+guesses at it in the meantime.
+
+Warnings that do not fail the workflow: a created term shorter than what was
+built, any line the API repriced away from what was sent (expected on the
+catalog path), a billable subscription charge with no line in the rebuild,
+charges zeroed because the quote does not carry them, and a period carrying
+fewer seats than the subscription's renewing charges.
 
 Logs are kept under HubSpot's 4KB ceiling, which counts a ~30-byte timestamp
 and level prefix on every line as well as the message. Per-line output is
 capped at 12 billable lines, periods and pools are summarised on one line each
 rather than one per period, and every charge list is truncated with a `+N`
-count. The two real orders in the fixtures come in around 2.9KB and 2.4KB with
+count. The real orders in the fixtures come in between 2.3KB and 2.9KB with
 prefixes included; `node test/rebuild-renewal-order.test.js` does not check
 this, so re-measure if you add logging.
 
@@ -240,6 +293,14 @@ this, so re-measure if you add logging.
 node test/rebuild-renewal-order.test.js
 ```
 
-Runs the real step 2 file with `axios` stubbed, against fixtures modelled on
-ORD-39HY7JN (a two-year ramped order) and a one-year variant of the same deal.
-No network, no dependencies.
+Runs the real step 2 file with `axios` stubbed, against fixtures built from
+real orders: ORD-39HY7JN (two-year ramped), ORD-WD9TZMR (lines the quote does
+not carry), ORD-9X3HCPP (Essential Assessment), ORD-7V4N727 (quoted quantities
+against a subscription that disagrees) and ORD-YT4NWKB (the 211-seat cohort
+and the moved rate card). No network, no dependencies.
+
+The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
+a line sent down the catalog path is priced by the API and a stub that just
+echoes the payload back cannot show what the order really costs. Run against
+the code as it stood before the cohort fix, that fixture builds $43,839.18 —
+ORD-3YQB21H to the cent.

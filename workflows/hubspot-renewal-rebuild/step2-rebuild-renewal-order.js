@@ -771,6 +771,7 @@ exports.main = async (event, callback) => {
       // If the candidates differ in ANY of those, the choice would matter,
       // so nothing is claimed and the Year Groups guard rail stops the run.
       const cohortNotes = [];
+      const ambiguousCohorts = [];
       const unmatchedByQuantity = new Map();
       resolutions.forEach(({ item: draftItem, charge }, index) => {
         if (matches[index].item) return;
@@ -790,20 +791,31 @@ exports.main = async (event, callback) => {
           continue;
         }
 
-        indexes.forEach((index, position) => {
-          if (position < candidates.length) {
-            claim(index, candidates[position], 'cohort');
-          } else {
-            // More new charges than old ones at this quantity. The cohort is
-            // homogeneous, so the surviving line is still the right pricing
-            // and Year Groups source for the extras.
-            matches[index] = { item: candidates[candidates.length - 1], via: 'cohort/extra' };
-          }
-        });
+        // Positional pairing is only safe while every draft line gets a
+        // quoted line of its own. The cohort is homogeneous, so which is
+        // paired with which cannot change the order — but once there are
+        // more draft lines than quoted ones that stops being true. The
+        // pairing then decides which charge is billed and which is held at
+        // zero, and nothing here can tell them apart.
+        //
+        // This used to hand the surplus a copy of the last candidate. On
+        // ORD-3YQB21H that billed the single 211-seat line ORD-YT4NWKB
+        // quotes ($19,939.50) twice, once as Religious Education and once
+        // as Arts, and neither was zeroed because both reported a match.
+        if (indexes.length > candidates.length) {
+          ambiguousCohorts.push({
+            quantity,
+            draftCharges: indexes.map(i => resolutions[i].item.chargeId),
+            quotedCharges: candidates.map(i => i.chargeId)
+          });
+          continue;
+        }
+
+        indexes.forEach((index, position) => claim(index, candidates[position], 'cohort'));
         cohortNotes.push(`qty ${quantity}: ${indexes.length} draft line(s) paired to ${candidates.length} existing line(s)`);
       }
 
-      return { matches, cohortNotes };
+      return { matches, cohortNotes, ambiguousCohorts };
     };
 
     const orderYearsFieldId = findOrderYearsFieldId(draftLineItems)
@@ -877,6 +889,26 @@ exports.main = async (event, callback) => {
     const fullSpanMatchSet = isMultiSegment
       ? matchExistingItems(draftResolutions, fullSpanPool)
       : segmentMatchSets[0];
+
+    // More interchangeable draft lines than the quote carries at that seat
+    // count. One quoted line can only ever become one rebuilt line, so some
+    // of these renew and the rest are held at zero — and which is which is a
+    // commercial decision, not something a matcher can infer. A rep picks.
+    const ambiguousCohorts = [];
+    const seenCohorts = new Set();
+    for (const set of segmentMatchSets.concat(isMultiSegment ? [fullSpanMatchSet] : [])) {
+      for (const cohort of set.ambiguousCohorts) {
+        const key = `${cohort.quantity}|${cohort.draftCharges.join(',')}|${cohort.quotedCharges.join(',')}`;
+        if (seenCohorts.has(key)) continue;
+        seenCohorts.add(key);
+        ambiguousCohorts.push(cohort);
+      }
+    }
+    if (ambiguousCohorts.length > 0) {
+      const { quantity, draftCharges, quotedCharges } = ambiguousCohorts[0];
+      const list = (ids) => ids.slice(0, 4).join(', ') + (ids.length > 4 ? ` +${ids.length - 4}` : '');
+      throw refuse(OUTCOME.MANUAL, `at ${quantity} seats the fresh draft offers ${draftCharges.length} interchangeable charge(s) (${list(draftCharges)}) where ${existingRenewalOrderId} quotes ${quotedCharges.length} (${list(quotedCharges)}) — nothing distinguishes them, so which one renews has to be chosen by hand${ambiguousCohorts.length > 1 ? `, and ${ambiguousCohorts.length - 1} other seat count(s) are ambiguous too` : ''}`);
+    }
 
     // A line is ramped if the existing order quoted it period by period.
     // One that only appears once, spanning the whole term, stays a single
@@ -1161,6 +1193,18 @@ exports.main = async (event, callback) => {
         pricingMode = `${pricingMode} +ramp x${segmentUpliftRatios[segmentIndex].toFixed(4)}`;
       }
 
+      // What the quote says this line should cost, kept alongside the line
+      // so the check after creation can compare the API's final price
+      // against the agreed one rather than against the placeholder we sent.
+      // A period that borrowed another period's line is expected to sit a
+      // ramp above it, so the target is uplifted the same way the price was.
+      if (existingItem && existingItem.sellUnitPrice != null && lineItem.quantity > 0) {
+        const target = (usedFallback && Math.abs(fallbackRatio - 1) > 0.000001)
+          ? existingItem.sellUnitPrice * fallbackRatio
+          : existingItem.sellUnitPrice;
+        lineItem.quotedSellUnitPrice = Math.round(target * 10000) / 10000;
+      }
+
       lineItem = injectYearsField(lineItem, yearsData, orderYearsFieldId);
       lineItem.segmentIndex = segmentIndex;
 
@@ -1408,13 +1452,14 @@ exports.main = async (event, callback) => {
     // this is the first point at which the rebuilt total is knowable. Both
     // totals cover the full term, so a multi-period rebuild is compared
     // like for like.
+    const reviewReasons = [];
     const existingTotal = existingOrder.totalAmount || 0;
     const createdTotal = createdOrder.totalAmount || 0;
     if (existingTotal > 0) {
       const drift = (createdTotal - existingTotal) / existingTotal;
       console.log(`Value: existing=${existingTotal} rebuilt=${createdTotal} drift=${(drift * 100).toFixed(2)}%`);
       if (Math.abs(drift) > 0.10) {
-        console.error(`WARNING: rebuilt total ${createdTotal} differs from existing order ${existingTotal} by ${(drift * 100).toFixed(2)}% — DO NOT SEND ${createdOrder.id} without reviewing line pricing`);
+        reviewReasons.push(`total ${createdTotal} is ${(drift * 100).toFixed(1)}% off the ${existingTotal} quoted on ${existingRenewalOrderId}`);
       }
     }
 
@@ -1426,17 +1471,56 @@ exports.main = async (event, callback) => {
       console.error(`WARNING: created order ${createdOrder.id} ends ${formatDate(createdOrder.endDate)} but was built to end ${formatDate(orderEndDate)} — check the term before sending`);
     }
 
-    // Report any line the API priced differently from what was intended.
+    // Line by line against the quote, which the total cannot see: three
+    // lines the API repriced from $37.67 to $39.60 moved ORD-3YQB21H's
+    // total by under 1%, well inside the 10% band above.
+    //
+    // A line whose attributes had to be recovered is sent placeholder
+    // prices and a discount percentage, because the draft priced itself off
+    // the wrong rate card row and its base is unusable. The API then prices
+    // it from the CURRENT catalog on the corrected attributes — which is
+    // right for a catalog that has not moved and wrong the moment it has.
+    // There is no way to tell at build time, so it is caught here.
+    const repricedByApi = [];
+    const offQuote = [];
+    const claimedIntent = new Set();
     for (const created of (createdOrder.lineItems || [])) {
       if (!created.quantity) continue;
-      const intended = mergedLineItems.find(i =>
-        i.chargeId === created.chargeId
+      const intended = mergedLineItems.find(i => !claimedIntent.has(i)
+        && i.chargeId === created.chargeId
         && i.quantity === created.quantity
         && i.effectiveDate === created.effectiveDate);
-      if (intended && intended.sellUnitPrice != null
+      if (!intended) continue;
+      claimedIntent.add(intended);
+
+      if (intended.sellUnitPrice != null
         && Math.abs(created.sellUnitPrice - intended.sellUnitPrice) > 0.01) {
-        console.log(`Repriced by API: ${created.chargeId} ${formatDate(created.effectiveDate)} sent=${intended.sellUnitPrice} final=${created.sellUnitPrice} attrs=${describeAttributes(created.attributeReferences)}`);
+        repricedByApi.push(`${created.chargeId} sent=${intended.sellUnitPrice} final=${created.sellUnitPrice}`);
       }
+      if (intended.quotedSellUnitPrice != null
+        && Math.abs(created.sellUnitPrice - intended.quotedSellUnitPrice) > 0.01) {
+        offQuote.push(`${created.chargeId}(${created.quantity}) ${created.sellUnitPrice} vs quoted ${intended.quotedSellUnitPrice}`);
+      }
+    }
+
+    if (repricedByApi.length > 0) {
+      console.log(`Repriced by API on ${repricedByApi.length} line(s): ${repricedByApi.slice(0, 3).join(' | ')}${repricedByApi.length > 3 ? ` (+${repricedByApi.length - 3})` : ''}`);
+    }
+    if (offQuote.length > 0) {
+      reviewReasons.push(`${offQuote.length} line(s) priced away from the quote: ${offQuote.slice(0, 3).join('; ')}${offQuote.length > 3 ? ` +${offQuote.length - 3}` : ''}`);
+    }
+
+    // The order exists — it cannot be un-created — but it must not be
+    // promoted. Reporting REVIEW instead of DRAFT keeps steps 3 and 4 off
+    // it, so a wrong order never displaces the right one as the
+    // opportunity's primary and never syncs to HubSpot. ORD-3YQB21H did
+    // both, at 85% over quote, on nothing but a console warning.
+    const needsReview = reviewReasons.length > 0;
+    const reviewMessage = needsReview
+      ? `Review before sending — ${createdOrder.id} ${reviewReasons.join('; ')}`.slice(0, 500)
+      : '';
+    if (needsReview) {
+      console.error(`WARNING: ${reviewMessage} — DO NOT SEND without fixing the pricing`);
     }
 
     return callback({
@@ -1444,10 +1528,11 @@ exports.main = async (event, callback) => {
         generated_new_draft: true,
         new_order_created: true,
         new_renewal_order_id: createdOrder.id || '',
-        new_order_status: createdOrder.status || '',
+        new_order_status: needsReview ? 'REVIEW' : (createdOrder.status || ''),
         needs_manual_rebuild: false,
+        needs_review: needsReview,
         new_order_total: createdOrder.totalAmount || 0,
-        error_message: '',
+        error_message: reviewMessage,
         renewal_for_subscription_id: subscriptionId,
         account_id: createdOrder.accountId || '',
         opportunity_id: createdOrder.sfdcOpportunityId || '',
@@ -1483,6 +1568,7 @@ exports.main = async (event, callback) => {
         new_renewal_order_id: '',
         new_order_status: outcome,
         needs_manual_rebuild: outcome === 'MANUAL',
+        needs_review: false,
         new_order_total: 0,
         error_message: errorMessage,
         renewal_for_subscription_id: subscriptionId || '',

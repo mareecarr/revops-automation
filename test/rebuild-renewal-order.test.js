@@ -24,12 +24,16 @@ const fixtures = require('./fixtures/methodist-ladies-2year.js');
 const allSaints = require('./fixtures/all-saints-2year.js');
 const ea = require('./fixtures/essential-assessment.js');
 const dilworth = require('./fixtures/dilworth-single-period.js');
+const encounter = require('./fixtures/encounter-lutheran.js');
 
 const { P1, P2, END } = fixtures;
 
 const round2 = (value) => Math.round(value * 100) / 100;
 
-const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit }) => {
+// `reprice` stands in for Subskribe pricing a line itself: the API recomputes
+// any line sent down the catalog path, and the created order comes back with
+// its numbers, not ours.
+const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit, reprice }) => {
   const enrolledSubscriptionId = subscriptionId || subscription.id;
   let posted = null;
   let createdOrder = null;
@@ -44,7 +48,8 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptio
     post: async (url, data) => {
       assert.ok(url.endsWith('/orders'), `Unexpected POST ${url}`);
       posted = data;
-      const total = round2(data.lineItems.reduce(
+      const finalLines = reprice ? data.lineItems.map(reprice) : data.lineItems;
+      const total = round2(finalLines.reduce(
         (sum, i) => sum + (i.quantity || 0) * (i.sellUnitPrice || 0), 0));
       createdOrder = {
         id: 'ORD-REBUILT1',
@@ -55,7 +60,7 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptio
         endDate: data.endDate,
         sfdcOpportunityId: data.sfdcOpportunityId,
         sfdcOpportunityName: data.sfdcOpportunityName,
-        lineItems: data.lineItems
+        lineItems: finalLines
       };
       return { data: createdOrder };
     }
@@ -674,6 +679,99 @@ test('quoted lines missing from the draft are named in the error', async () => {
   assert.match(output.error_message, /CHRG-NX6XC3K\(100\)/);
   assert.match(output.error_message, /CHRG-YJ6G27N\(142\)/);
   assert.match(output.error_message, /CHRG-69JTX8J\(72\)/);
+});
+
+// ==================================================
+// ORD-YT4NWKB / SUB-FDGKQ1P — Encounter Lutheran College
+//
+// The order that came back at $43,839.19 against a $23,706.50 quote. Two
+// faults, one that doubled the order and one that quietly moved three lines
+// 5% up; see the fixture's header for the mechanics of each.
+// ==================================================
+const encounterCase = (overrides = {}) => ({
+  subscription: encounter.buildSubscription(),
+  existingOrder: encounter.buildExistingOrder(),
+  draftRenewal: encounter.buildDraftRenewal(),
+  ...overrides
+});
+
+test('two draft lines competing for one quoted line is a hand-off, not a guess', async () => {
+  const { posted, output } = await runStep2(encounterCase());
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.strictEqual(output.new_order_status, 'MANUAL');
+  assert.strictEqual(output.needs_manual_rebuild, true);
+  assert.match(output.error_message, /at 211 seats/);
+  assert.match(output.error_message, /CHRG-Z16B0CQ/);
+  assert.match(output.error_message, /CHRG-GHMDQKD/);
+  assert.match(output.error_message, /CHRG-HW42JYY/);
+});
+
+test('no quoted line ever prices two rebuilt lines', async () => {
+  // With the surplus draft line gone the cohort pairs one to one, and the
+  // 211-seat quote line is worth $19,939.50 once — not twice.
+  const { posted, output } = await runStep2(encounterCase({
+    draftRenewal: encounter.buildDraftRenewal({ dropCharge: 'CHRG-GHMDQKD' }),
+    reprice: encounter.repriceLikeSubskribe
+  }));
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+
+  const billable = posted.lineItems.filter(i => i.quantity > 0);
+  assert.strictEqual(billable.length, 4, 'four billable lines, as the quote has');
+  assert.deepStrictEqual(
+    billable.map(i => i.quantity).sort((a, b) => a - b), [10, 20, 70, 211]);
+
+  const [big] = billable.filter(i => i.quantity === 211);
+  assert.strictEqual(round2(big.sellUnitPrice), 94.5);
+  assert.strictEqual(round2(big.quantity * big.sellUnitPrice), 19939.5);
+
+  // 43,839.19 was that one line counted twice. Whatever the catalog has
+  // since done to the other three, the order cannot land near it again.
+  assert.ok(output.new_order_total < 24000,
+    `total was ${output.new_order_total}, against a 23706.5 quote`);
+});
+
+test('the giveaway charges the quote leaves off are held at zero', async () => {
+  const { posted } = await runStep2(encounterCase({
+    draftRenewal: encounter.buildDraftRenewal({ dropCharge: 'CHRG-GHMDQKD' }),
+    reprice: encounter.repriceLikeSubskribe
+  }));
+
+  // CHRG-DZCPWQC and the rest of PLAN-TG9K5EY still have to be sent, or the
+  // API rejects the order for a half-represented plan.
+  const planLines = posted.lineItems.filter(i => i.planId === 'PLAN-TG9K5EY');
+  assert.strictEqual(planLines.length, 4);
+  assert.strictEqual(planLines.filter(i => i.quantity > 0).length, 1);
+});
+
+test('a line the API prices away from the quote holds the order back', async () => {
+  const { posted, output } = await runStep2(encounterCase({
+    draftRenewal: encounter.buildDraftRenewal({ dropCharge: 'CHRG-GHMDQKD' }),
+    reprice: encounter.repriceLikeSubskribe
+  }));
+
+  // The order is created — it cannot be un-created — but REVIEW keeps steps
+  // 3 and 4 off it, so it never displaces the right order as primary.
+  assert.ok(posted, 'the order is still created');
+  assert.strictEqual(output.new_order_created, true);
+  assert.strictEqual(output.new_order_status, 'REVIEW');
+  assert.strictEqual(output.needs_review, true);
+  assert.strictEqual(output.needs_manual_rebuild, false, 'the rebuild worked; the catalog moved');
+  assert.match(output.error_message, /3 line\(s\) priced away from the quote/);
+  assert.match(output.error_message, /vs quoted 37\.67/);
+
+  // Only 0.8% on the total: the old 10% drift check could never have seen it.
+  const drift = (output.new_order_total - 23706.5) / 23706.5;
+  assert.ok(drift > 0 && drift < 0.01, `drift was ${(drift * 100).toFixed(2)}%`);
+});
+
+test('a rebuild the API left alone reports DRAFT, not REVIEW', async () => {
+  const { output } = await runStep2(dilworthCase());
+
+  assert.strictEqual(output.new_order_status, 'DRAFT');
+  assert.strictEqual(output.needs_review, false);
+  assert.strictEqual(output.error_message, '');
 });
 
 // ==================================================
