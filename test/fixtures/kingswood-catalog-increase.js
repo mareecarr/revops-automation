@@ -10,9 +10,13 @@
 // The rebuild used to re-anchor that absolute $45.15 onto the new charge via
 // a listPriceOverrideRatio (49 / 51.5 = 0.951456), which pins the price at
 // its PRE-rise value regardless of which way the catalog moved: List Unit
-// Price came back as 48.99998, an invented override, not the new list. The
-// 7.86% discount should instead survive onto the CURRENT list, landing on
-// 47.4536 — a rise, because the catalog rose.
+// Price came back as 48.99998, an invented override, not the new list.
+//
+// The correct fix keeps the negotiated $45.15 EXACTLY as quoted and just
+// updates List Unit Price to the current catalog (51.50), recomputing the
+// discount from 7.86% to 12.33% to reconcile the two — not letting the
+// dollar amount float upward with the catalog, which was tried and is also
+// wrong. Confirmed against the real corrected order.
 //
 // Deliberately kept unambiguous: both draft lines match their quoted
 // counterpart on quantity as well as attributes, so this exercises

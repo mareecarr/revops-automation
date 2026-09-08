@@ -268,26 +268,27 @@ exports.main = async (event, callback) => {
       return lineItem;
     };
 
-    // Carries the negotiated DISCOUNT PERCENTAGE onto the charge's own
-    // CURRENT catalog list price — draftItem's, whether the charge was
-    // renamed in a plan swap or is the very same chargeId as the quote.
-    // Never the old absolute dollar amount: List Unit Price is only ever
-    // edited to express a price ABOVE the current catalog list (a genuine
-    // premium override, which a discount cannot express); a price at or
-    // below list is always a discount off whatever the current list is,
-    // never a markdown of the list itself.
+    // Keeps the EXACT negotiated sell price the quote agreed, and updates
+    // List Unit Price to the charge's own CURRENT catalog list —
+    // draftItem's, whether the charge was renamed in a plan swap or is the
+    // very same chargeId as the quote — recomputing the discount
+    // PERCENTAGE to bridge the two. List Unit Price is only ever edited
+    // to express a price ABOVE the current catalog list (a genuine premium
+    // override, which a discount cannot express, there being no such thing
+    // as a negative discount); every other case is a discount off whatever
+    // the CURRENT list is, never a markdown of the list itself.
     //
-    // This used to re-anchor the OLD absolute sell price onto the new base
-    // via a listPriceOverrideRatio, which pins the price at whatever it was
-    // BEFORE the swap regardless of which way the catalog moved. On
-    // ORD-16QXXQ8 the 2027 catalog raised CHRG-6T5J1FH's list 49 -> 51.50,
-    // and the override held the order at the 2026 sell price of $45.15
-    // instead of the $47.45 the same 7.86% discount gives on the new list —
-    // discount PERCENTAGES survive a catalog re-version, absolute prices do
-    // not (see deriveDiscounts above), and this was doing the opposite.
-    // The same freeze happened on a charge that was never renamed at all
-    // (copyAbsolutePricing sending the quote's own old list verbatim) —
-    // this function now covers that case too; see the call site below.
+    // This used to re-anchor the old absolute price differently — first by
+    // freezing the list too (a listPriceOverrideRatio computed from the
+    // OLD list, which is the actual reported bug: ORD-16QXXQ8 sent
+    // `listUnitPrice: 48.99998` instead of the new catalog's 51.50), and
+    // then, in an intermediate fix, by holding the discount PERCENTAGE
+    // fixed and letting the dollar amount float with catalog. Neither is
+    // right: the quote's $45.15 is the actual negotiated price, and it
+    // survives the plan swap unchanged; only List Unit Price updates to
+    // show the real current catalog (51.50), with the discount recomputed
+    // (7.86% -> 12.33%) to reconcile the two. Confirmed against Kingswood's
+    // own corrected order.
     //
     // ONLY valid when the draft line's own attributes are the correct ones.
     // If attributes had to be recovered, the draft priced itself off the
@@ -298,19 +299,16 @@ exports.main = async (event, callback) => {
       const newList = draftItem.listUnitPriceBeforeOverride != null
         ? draftItem.listUnitPriceBeforeOverride
         : draftItem.listUnitPrice;
-      if (!newList || source.sellUnitPrice == null || source.listUnitPrice == null) {
+      const targetSell = source.sellUnitPrice;
+      if (!newList || targetSell == null) {
         return copyAbsolutePricing(lineItem, source);
       }
-      const discounts = deriveDiscounts(source);
-      const percent = discounts.length > 0 ? discounts[0].percent : 0;
-      const targetSell = Math.round(newList * (1 - percent) * 10000) / 10000;
 
       if (targetSell > newList) {
-        // A genuine premium: the negotiated position sits ABOVE the new
-        // catalog list, which a discount cannot express (no such thing as
-        // a negative discount), so the list price itself has to move. The
-        // one case the rule above carves out — everything else is a
-        // discount, never a markdown of the list.
+        // A genuine premium: the negotiated price sits ABOVE the new
+        // catalog list, which a discount cannot express, so the list price
+        // itself has to move to accommodate it — the one case the rule
+        // above carves out.
         lineItem.listUnitPrice = targetSell;
         lineItem.sellUnitPrice = targetSell;
         lineItem.discounts = [];
@@ -319,9 +317,12 @@ exports.main = async (event, callback) => {
         return lineItem;
       }
 
+      const percent = (newList - targetSell) / newList;
       lineItem.listUnitPrice = newList;
       lineItem.sellUnitPrice = targetSell;
-      lineItem.discounts = discounts;
+      lineItem.discounts = percent > 0
+        ? [{ name: 'default', percent, discountAmount: null, status: null, discountedPrice: null }]
+        : [];
       return lineItem;
     };
 

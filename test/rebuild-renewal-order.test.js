@@ -737,20 +737,24 @@ test('no quoted line ever prices two rebuilt lines', async () => {
   assert.deepStrictEqual(
     billable.map(i => i.quantity).sort((a, b) => a - b), [10, 20, 70, 211]);
 
-  // CHRG-Z16B0CQ's own catalog list (26.75) is nothing like CHRG-HW42JYY's
-  // (105) — it is really the successor of one of the two free giveaway
-  // charges, not of the paid one, and only ends up paired here because the
-  // test drops the other candidate to isolate the duplication bug. So the
-  // 10% discount carried over lands on 26.75, not on 105: 24.075 a seat.
-  // That is the discount-percentages-survive rule working as intended, not
-  // a second pricing bug — a real occurrence of this pairing is exactly
-  // the MANUAL case the cohort-ambiguity guard above exists to catch.
+  // CHRG-Z16B0CQ's own catalog list (26.75) is nothing like the $94.50
+  // CHRG-HW42JYY was actually sold at — it is really the successor of one
+  // of the two free giveaway charges, not of the paid one, and only ends
+  // up paired here because the test drops the other candidate to isolate
+  // the duplication bug. $94.50 is above that new list, so this is exactly
+  // the premium case: List Unit Price moves up to accommodate the quoted
+  // price rather than silently discounting it away to $24 — a real
+  // occurrence of this pairing is precisely the MANUAL case the
+  // cohort-ambiguity guard above exists to catch instead.
   const [big] = billable.filter(i => i.quantity === 211);
-  assert.strictEqual(round2(big.sellUnitPrice), 24.08);
+  assert.strictEqual(big.sellUnitPrice, 94.5);
+  assert.strictEqual(big.listUnitPrice, 94.5);
+  assert.ok(Math.abs(big.listPriceOverrideRatio - (94.5 / 26.75)) < 0.000001);
 
-  // 43,839.19 was that one line counted twice at $94.50. Whatever the
-  // catalog has done to any of the four lines, the total cannot land
-  // anywhere near that again.
+  // 43,839.19 was that one line counted twice. It is worth $19,939.50 once,
+  // not twice, whatever the catalog has done to the other three lines.
+  const [bigTotal] = [big.quantity * big.sellUnitPrice];
+  assert.strictEqual(round2(bigTotal), 19939.5);
   assert.ok(output.new_order_total < 24000,
     `total was ${output.new_order_total}, against a 23706.5 quote`);
 });
@@ -817,7 +821,7 @@ const kingswoodCase = (overrides = {}) => ({
   ...overrides
 });
 
-test('a catalog rise across a plan swap reaches the customer', async () => {
+test('a catalog rise updates List Unit Price, not the negotiated sell price', async () => {
   const { posted, output } = await runStep2(kingswoodCase());
 
   assert.strictEqual(output.new_order_created, true, output.error_message);
@@ -832,15 +836,17 @@ test('a catalog rise across a plan swap reaches the customer', async () => {
   assert.strictEqual(small.listPriceOverrideRatio, undefined);
   assert.strictEqual(big.listPriceOverrideRatio, undefined);
 
-  // The SAME 7.86% discount the quote carried, now off the new list: a
-  // rise from $45.15 to $47.4536, not a freeze at the old price.
-  const expectedSell = Math.round(51.5 * (1 - 0.0785714286) * 10000) / 10000;
-  assert.strictEqual(small.sellUnitPrice, expectedSell);
-  assert.strictEqual(big.sellUnitPrice, expectedSell);
-  assert.ok(small.sellUnitPrice > 45.15, 'the rise must reach the customer, not be held back');
+  // The EXACT $45.15 the customer was quoted — unchanged, not raised, not
+  // frozen behind an override. Confirmed against Kingswood's own corrected
+  // order: same 45.15, list updated to 51.5, discount recomputed to match.
+  assert.strictEqual(small.sellUnitPrice, 45.15);
+  assert.strictEqual(big.sellUnitPrice, 45.15);
 
+  // 7.86% off the old list and 12.33% off the new list land on the same
+  // dollar figure — the discount is derived, not preserved.
   assert.strictEqual(small.discounts[0].name, 'default');
-  assert.ok(Math.abs(small.discounts[0].percent - 0.0785714286) < 0.0000001);
+  assert.ok(Math.abs(small.discounts[0].percent - 0.12330097087378641) < 0.0000001);
+  assert.ok(Math.abs(big.discounts[0].percent - 0.12330097087378641) < 0.0000001);
 });
 
 test('a catalog rise carried correctly needs no review', async () => {

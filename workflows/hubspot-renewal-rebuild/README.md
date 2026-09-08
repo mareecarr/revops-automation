@@ -276,44 +276,43 @@ above — a plan swap priced by `repriceOffCurrentCatalog` below has already com
 its own final number, and a deliberate difference from the old quote there is
 the fix working, not something to flag.
 
-### A catalog rise must reach the customer, swapped charge or not
+### List Unit Price always reads the current catalog — the negotiated price never moves for it
 
 Any billable line whose attributes are already correct (nothing had to be
-recovered) is priced by `repriceOffCurrentCatalog`: it carries the quote's own
-**discount percentage** onto the charge's own CURRENT catalog list — the
-fresh draft's `listUnitPrice` — rather than leaving the price to the API or
-copying the quote's old absolute number forward. That applies identically
-whether the charge was renamed in a plan swap or is the exact same chargeId
-as the quote: either way, `draftItem.listUnitPrice` is the current catalog
-price for that commercial item, and a deliberate difference from the old
-quote here is correct, not a fault — a catalog increase is supposed to reach
-the customer.
+recovered) is priced by `repriceOffCurrentCatalog`: it keeps the EXACT dollar
+sell price the quote agreed, and updates List Unit Price to the charge's own
+CURRENT catalog list — the fresh draft's `listUnitPrice` — recomputing the
+discount percentage to bridge the two. That applies identically whether the
+charge was renamed in a plan swap or is the exact same chargeId as the
+quote: either way, `draftItem.listUnitPrice` is the current catalog price
+for that commercial item, and List Unit Price should say so, whatever it
+takes the discount percentage to still land on the price the customer
+actually pays.
 
-It used to do the opposite, and in two different places. A renamed charge
-(a plan swap) re-anchored the OLD absolute price onto the new charge via an
-invented `listPriceOverrideRatio`: ORD-16QXXQ8 quotes CHRG-Y1JWZ9T at list 49
-/ sell 45.15 (a plain 7.86% discount, no override), and its 2027 successor
-CHRG-6T5J1FH lists at 51.50, but the rebuild sent `listUnitPrice: 48.99998`
-(= 51.5 x (49 / 51.5)) — not the new catalog's 51.50. An UN-renamed charge had
-the same problem one step earlier: it copied the quote's old list/sell
-verbatim regardless of whether the current catalog agreed, which is exactly
-what a plain "same chargeId" renewal does for the negotiated tier a customer
-is actually on when the fresh draft defaults to a different one — All Saints'
-CHRG-TQ9CHVP is quoted on "Plus", the single fresh draft defaults to "Core",
-and the pre-fix rebuild carried the 2026 Plus price forward forever, on
-either side of a catalog rise. Whichever way the catalog had moved, and
-whichever route reached it, the price was held at whatever it was **before**
-the rebuild ran — defeating the entire point of quoting off a fresh draft.
+It used to get this wrong twice, in two different ways, on two different
+lines. A renamed charge (a plan swap) re-anchored the OLD absolute price
+onto the new charge via an invented `listPriceOverrideRatio`: ORD-16QXXQ8
+quotes CHRG-Y1JWZ9T at list 49 / sell 45.15 (a plain 7.86% discount, no
+override), and its 2027 successor CHRG-6T5J1FH lists at 51.50, but the
+rebuild sent `listUnitPrice: 48.99998` (= 51.5 x (49 / 51.5)) — not the new
+catalog's 51.50. An UN-renamed charge had the same problem one step earlier:
+it copied the quote's old list/sell verbatim regardless of whether the
+current catalog agreed — All Saints' CHRG-TQ9CHVP is quoted on "Plus", the
+single fresh draft defaults to "Core", and the pre-fix rebuild carried the
+2026 Plus price forward forever. An intermediate fix corrected List Unit
+Price but went too far the other way, treating the discount *percentage* as
+the negotiated term and letting the dollar amount float upward with the
+catalog (CHRG-6T5J1FH at $47.45) — plausible, but wrong: **the exact $45.15
+is the negotiated position, and it does not move just because the catalog
+did.**
 
-Discount percentages survive a catalog re-version; absolute prices do not —
-the same rule `deriveDiscounts` follows everywhere else in this rebuild.
 **List Unit Price is only ever edited to express a price above the current
 catalog list** — a genuine premium override, which a discount cannot
-express, since there is no such thing as a negative discount. A price at or
-below list is always a discount off whatever the list currently is, never a
-markdown of the list itself. So a corrected line sends the current catalog's
-own list price and lets the discount land the sell price — up when the
-catalog rose (CHRG-6T5J1FH: 45.15 -> 47.4536), with no override at all.
+express, since there is no such thing as a negative discount. Every other
+case keeps the quote's own sell price exactly, sends the CURRENT catalog's
+own list price, and lets the discount percentage be whatever number
+reconciles them — 7.86% off the 2026 list and 12.33% off the 2027 one land
+on the identical $45.15. Confirmed against Kingswood's own corrected order.
 
 This only holds when the fresh draft's own list price is for the RIGHT
 attributes. When they had to be recovered — the draft defaulted to a tier
