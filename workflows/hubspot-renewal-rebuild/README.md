@@ -271,7 +271,38 @@ against what was sent, and the order is reported `REVIEW` when they differ.
 Three lines moving 5% shifted the total by 0.8% — the 10% drift check could
 never have seen it. Correcting the price automatically would need the new
 rate card at build time; a plan lookup could supply it, and nothing here
-guesses at it in the meantime.
+guesses at it in the meantime. This check only fires on the catalog path
+above — a plan swap priced by `repriceSwappedLine` below has already computed
+its own final number, and a deliberate difference from the old quote there is
+the fix working, not something to flag.
+
+### A catalog rise across a plan swap must reach the customer
+
+A cross-charge match whose attributes are already correct (nothing to
+recover) takes a different path: `repriceSwappedLine` carries the quote's own
+**discount percentage** onto the new charge's own catalog list, rather than
+leaving the price to the API. That is the one line in this rebuild where a
+deliberate difference from the old quote is correct, not a fault — a
+catalog increase is supposed to reach the customer.
+
+It used to do the opposite. ORD-16QXXQ8 quotes CHRG-Y1JWZ9T at list 49 / sell
+45.15 (a plain 7.86% discount, no override), and its 2027 successor
+CHRG-6T5J1FH lists at 51.50. The rebuild re-anchored the OLD absolute $45.15
+onto the new charge via an invented `listPriceOverrideRatio` (49 / 51.5 =
+0.951456) — sending `listUnitPrice: 48.99998`, not the new catalog's 51.50.
+Whichever way the catalog had moved, that override held the price at
+whatever it was **before** the swap, defeating the entire point of quoting
+off a fresh draft.
+
+Discount percentages survive a catalog re-version; absolute prices do not —
+the same rule `deriveDiscounts` follows everywhere else in this rebuild.
+**List Unit Price is only ever edited to express a price above the current
+catalog list** — a genuine premium override, which a discount cannot
+express, since there is no such thing as a negative discount. A price at or
+below list is always a discount off whatever the list currently is, never a
+markdown of the list itself. So the fixed line sends `listUnitPrice: 51.5`
+(the new catalog's own number) and lets the 7.86% discount land it at
+**$47.4536** — a rise, because the catalog rose — with no override at all.
 
 Warnings that do not fail the workflow: a created term shorter than what was
 built, any line the API repriced away from what was sent (expected on the
@@ -296,8 +327,9 @@ node test/rebuild-renewal-order.test.js
 Runs the real step 2 file with `axios` stubbed, against fixtures built from
 real orders: ORD-39HY7JN (two-year ramped), ORD-WD9TZMR (lines the quote does
 not carry), ORD-9X3HCPP (Essential Assessment), ORD-7V4N727 (quoted quantities
-against a subscription that disagrees) and ORD-YT4NWKB (the 211-seat cohort
-and the moved rate card). No network, no dependencies.
+against a subscription that disagrees), ORD-YT4NWKB (the 211-seat cohort and
+the moved rate card) and ORD-16QXXQ8 (a catalog rise frozen out by an invented
+list price override). No network, no dependencies.
 
 The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
 a line sent down the catalog path is priced by the API and a stub that just

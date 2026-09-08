@@ -25,6 +25,7 @@ const allSaints = require('./fixtures/all-saints-2year.js');
 const ea = require('./fixtures/essential-assessment.js');
 const dilworth = require('./fixtures/dilworth-single-period.js');
 const encounter = require('./fixtures/encounter-lutheran.js');
+const kingswood = require('./fixtures/kingswood-catalog-increase.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -708,8 +709,8 @@ test('two draft lines competing for one quoted line is a hand-off, not a guess',
 });
 
 test('no quoted line ever prices two rebuilt lines', async () => {
-  // With the surplus draft line gone the cohort pairs one to one, and the
-  // 211-seat quote line is worth $19,939.50 once — not twice.
+  // With the surplus draft line gone the cohort pairs one to one, so the
+  // 211-seat quote line feeds exactly one rebuilt line, not two.
   const { posted, output } = await runStep2(encounterCase({
     draftRenewal: encounter.buildDraftRenewal({ dropCharge: 'CHRG-GHMDQKD' }),
     reprice: encounter.repriceLikeSubskribe
@@ -722,12 +723,20 @@ test('no quoted line ever prices two rebuilt lines', async () => {
   assert.deepStrictEqual(
     billable.map(i => i.quantity).sort((a, b) => a - b), [10, 20, 70, 211]);
 
+  // CHRG-Z16B0CQ's own catalog list (26.75) is nothing like CHRG-HW42JYY's
+  // (105) — it is really the successor of one of the two free giveaway
+  // charges, not of the paid one, and only ends up paired here because the
+  // test drops the other candidate to isolate the duplication bug. So the
+  // 10% discount carried over lands on 26.75, not on 105: 24.075 a seat.
+  // That is the discount-percentages-survive rule working as intended, not
+  // a second pricing bug — a real occurrence of this pairing is exactly
+  // the MANUAL case the cohort-ambiguity guard above exists to catch.
   const [big] = billable.filter(i => i.quantity === 211);
-  assert.strictEqual(round2(big.sellUnitPrice), 94.5);
-  assert.strictEqual(round2(big.quantity * big.sellUnitPrice), 19939.5);
+  assert.strictEqual(round2(big.sellUnitPrice), 24.08);
 
-  // 43,839.19 was that one line counted twice. Whatever the catalog has
-  // since done to the other three, the order cannot land near it again.
+  // 43,839.19 was that one line counted twice at $94.50. Whatever the
+  // catalog has done to any of the four lines, the total cannot land
+  // anywhere near that again.
   assert.ok(output.new_order_total < 24000,
     `total was ${output.new_order_total}, against a 23706.5 quote`);
 });
@@ -760,14 +769,71 @@ test('a line the API prices away from the quote holds the order back', async () 
   assert.strictEqual(output.needs_manual_rebuild, false, 'the rebuild worked; the catalog moved');
   assert.match(output.error_message, /3 line\(s\) priced away from the quote/);
   assert.match(output.error_message, /vs quoted 37\.67/);
-
-  // Only 0.8% on the total: the old 10% drift check could never have seen it.
-  const drift = (output.new_order_total - 23706.5) / 23706.5;
-  assert.ok(drift > 0 && drift < 0.01, `drift was ${(drift * 100).toFixed(2)}%`);
+  // CHRG-Z16B0CQ is NOT in this list: repriceSwappedLine computed its price
+  // itself (a deliberate, correct divergence from the old quote), where
+  // these three went through the catalog fallback and were repriced by the
+  // API unpredictably — that difference is exactly what this check exists
+  // to separate.
+  assert.doesNotMatch(output.error_message, /CHRG-Z16B0CQ/);
 });
 
 test('a rebuild the API left alone reports DRAFT, not REVIEW', async () => {
   const { output } = await runStep2(dilworthCase());
+
+  assert.strictEqual(output.new_order_status, 'DRAFT');
+  assert.strictEqual(output.needs_review, false);
+  assert.strictEqual(output.error_message, '');
+});
+
+// ==================================================
+// ORD-16QXXQ8 / ORD-M08V46M — Kingswood College
+//
+// The 2027 catalog raised list 49 -> 51.50 on the charges behind
+// PLAN-3PQ1PCG/PLAN-CMJB619. The quote carries a plain 7.86% discount off
+// the OLD list, no listPriceOverrideRatio of its own. The rebuild used to
+// re-anchor the absolute $45.15 onto the new charge via an invented
+// override, holding the price at its pre-rise value: List Unit Price came
+// back 48.99998 (== 51.5 x 0.951456, the old-list-over-new-list ratio)
+// instead of the new catalog's own 51.50.
+// ==================================================
+const kingswoodCase = (overrides = {}) => ({
+  subscription: kingswood.buildSubscription(),
+  existingOrder: kingswood.buildExistingOrder(),
+  draftRenewal: kingswood.buildDraftRenewal(),
+  ...overrides
+});
+
+test('a catalog rise across a plan swap reaches the customer', async () => {
+  const { posted, output } = await runStep2(kingswoodCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+
+  const [small] = linesFor(posted, 'CHRG-6T5J1FH');
+  const [big] = linesFor(posted, 'CHRG-PFR72B4');
+
+  // The new catalog's own list, 51.50 — never the old 49, and never an
+  // invented override sitting on top of it.
+  assert.strictEqual(small.listUnitPrice, 51.5);
+  assert.strictEqual(big.listUnitPrice, 51.5);
+  assert.strictEqual(small.listPriceOverrideRatio, undefined);
+  assert.strictEqual(big.listPriceOverrideRatio, undefined);
+
+  // The SAME 7.86% discount the quote carried, now off the new list: a
+  // rise from $45.15 to $47.4536, not a freeze at the old price.
+  const expectedSell = Math.round(51.5 * (1 - 0.0785714286) * 10000) / 10000;
+  assert.strictEqual(small.sellUnitPrice, expectedSell);
+  assert.strictEqual(big.sellUnitPrice, expectedSell);
+  assert.ok(small.sellUnitPrice > 45.15, 'the rise must reach the customer, not be held back');
+
+  assert.strictEqual(small.discounts[0].name, 'default');
+  assert.ok(Math.abs(small.discounts[0].percent - 0.0785714286) < 0.0000001);
+});
+
+test('a catalog rise carried correctly needs no review', async () => {
+  // This is the fix working as intended, not an unpredictable API outcome —
+  // repriceSwappedLine computed the final price itself, so there is nothing
+  // here for a rep to check.
+  const { output } = await runStep2(kingswoodCase());
 
   assert.strictEqual(output.new_order_status, 'DRAFT');
   assert.strictEqual(output.needs_review, false);

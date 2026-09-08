@@ -268,30 +268,55 @@ exports.main = async (event, callback) => {
       return lineItem;
     };
 
-    // Re-anchors a negotiated absolute price onto the new charge's catalog
-    // base, so ratio x base still lands on the agreed price.
+    // Carries the negotiated DISCOUNT PERCENTAGE across a plan swap onto the
+    // new charge's own catalog list price. Never the old absolute dollar
+    // amount: List Unit Price is only ever edited to express a price ABOVE
+    // the new catalog list (a genuine premium override, which a discount
+    // cannot express); a price at or below list is always a discount off
+    // whatever the current list is, never a markdown of the list itself.
+    //
+    // This used to re-anchor the OLD absolute sell price onto the new base
+    // via a listPriceOverrideRatio, which pins the price at whatever it was
+    // BEFORE the swap regardless of which way the catalog moved. On
+    // ORD-16QXXQ8 the 2027 catalog raised CHRG-6T5J1FH's list 49 -> 51.50,
+    // and the override held the order at the 2026 sell price of $45.15
+    // instead of the $47.45 the same 7.86% discount gives on the new list —
+    // discount PERCENTAGES survive a catalog re-version, absolute prices do
+    // not (see deriveDiscounts above), and this was doing the opposite.
     //
     // ONLY valid when the draft line's own attributes are the correct ones.
     // If attributes had to be recovered, the draft priced itself off the
-    // wrong rate card row, its base is meaningless, and anchoring to it
+    // wrong rate card row, its list is meaningless, and anchoring to it
     // would misprice the line once the API re-looks-up on the corrected
     // attributes. Those lines take the catalog+discount path instead.
     const repriceSwappedLine = (lineItem, source, draftItem) => {
-      const targetList = source.listUnitPrice;
-      const targetSell = source.sellUnitPrice;
-      const newBase = draftItem.listUnitPriceBeforeOverride != null
+      const newList = draftItem.listUnitPriceBeforeOverride != null
         ? draftItem.listUnitPriceBeforeOverride
         : draftItem.listUnitPrice;
-      if (targetList == null || !newBase) {
+      if (!newList || source.sellUnitPrice == null || source.listUnitPrice == null) {
         return copyAbsolutePricing(lineItem, source);
       }
-      lineItem.listUnitPrice = targetList;
-      lineItem.sellUnitPrice = targetSell;
-      lineItem.discounts = deriveDiscounts(source);
-      if (Math.abs(targetList - newBase) > 0.0001) {
-        lineItem.listPriceOverrideRatio = Math.round((targetList / newBase) * 1000000) / 1000000;
-        lineItem.listUnitPriceBeforeOverride = newBase;
+      const discounts = deriveDiscounts(source);
+      const percent = discounts.length > 0 ? discounts[0].percent : 0;
+      const targetSell = Math.round(newList * (1 - percent) * 10000) / 10000;
+
+      if (targetSell > newList) {
+        // A genuine premium: the negotiated position sits ABOVE the new
+        // catalog list, which a discount cannot express (no such thing as
+        // a negative discount), so the list price itself has to move. The
+        // one case the rule above carves out — everything else is a
+        // discount, never a markdown of the list.
+        lineItem.listUnitPrice = targetSell;
+        lineItem.sellUnitPrice = targetSell;
+        lineItem.discounts = [];
+        lineItem.listPriceOverrideRatio = Math.round((targetSell / newList) * 1000000) / 1000000;
+        lineItem.listUnitPriceBeforeOverride = newList;
+        return lineItem;
       }
+
+      lineItem.listUnitPrice = newList;
+      lineItem.sellUnitPrice = targetSell;
+      lineItem.discounts = discounts;
       return lineItem;
     };
 
@@ -1140,6 +1165,14 @@ exports.main = async (event, callback) => {
       }
 
       let pricingMode;
+      // Set only when the line takes the catalog fallback below: sent
+      // prices there are placeholders the API resolves server-side against
+      // whatever the current rate card says, which is exactly the case that
+      // needs checking after creation. copyAbsolutePricing and
+      // repriceSwappedLine both compute the FINAL number themselves — a
+      // deliberate divergence from the old quote there (a catalog rise
+      // flowing through, say) is the fix working, not something to flag.
+      let tookCatalogFallback = false;
       if (!isPlanSwap) {
         const priceSource = existingItem || draftItem;
         lineItem = copyAbsolutePricing(lineItem, priceSource);
@@ -1158,10 +1191,11 @@ exports.main = async (event, callback) => {
         lineItem = copyAbsolutePricing(lineItem, existingItem);
         pricingMode = `swap+override sell=${lineItem.sellUnitPrice}`;
       } else if (isCrossChargeMatch && existingItem && !attributesWereRecovered) {
-        // The draft priced itself on the right rate card row, so its base is
-        // trustworthy and the negotiated absolute price can be re-anchored.
+        // The draft priced itself on the right rate card row, so its list is
+        // trustworthy — carry the negotiated discount PERCENTAGE onto it
+        // rather than freezing the old absolute price across the swap.
         lineItem = repriceSwappedLine(lineItem, existingItem, draftItem);
-        pricingMode = `swapped sell=${lineItem.sellUnitPrice}${lineItem.listPriceOverrideRatio != null ? ` ratio=${lineItem.listPriceOverrideRatio}` : ''}`;
+        pricingMode = `swapped list=${lineItem.listUnitPrice} sell=${lineItem.sellUnitPrice} disc=${lineItem.discounts.length ? `${Math.round(lineItem.discounts[0].percent * 10000) / 100}%` : '0%'}`;
       } else {
         // No negotiated override, or the draft's own pricing is unusable
         // because its attributes were wrong. Let the API price from the new
@@ -1175,6 +1209,7 @@ exports.main = async (event, callback) => {
           ? existingDiscounts
           : deriveDiscounts(charge);
         pricingMode = `catalog sell=API disc=${lineItem.discounts.length ? (Math.round(lineItem.discounts[0].percent * 10000) / 100) + '%' : '0'}`;
+        tookCatalogFallback = true;
       }
 
       // This period had no line of its own, so it inherited another
@@ -1196,9 +1231,13 @@ exports.main = async (event, callback) => {
       // What the quote says this line should cost, kept alongside the line
       // so the check after creation can compare the API's final price
       // against the agreed one rather than against the placeholder we sent.
+      // Only meaningful on the catalog fallback — everywhere else we sent
+      // the API an exact, deliberately-computed final price, and a
+      // difference from the OLD quote there (a catalog rise reaching the
+      // customer, say) is correct, not a divergence to flag.
       // A period that borrowed another period's line is expected to sit a
       // ramp above it, so the target is uplifted the same way the price was.
-      if (existingItem && existingItem.sellUnitPrice != null && lineItem.quantity > 0) {
+      if (tookCatalogFallback && existingItem && existingItem.sellUnitPrice != null && lineItem.quantity > 0) {
         const target = (usedFallback && Math.abs(fallbackRatio - 1) > 0.000001)
           ? existingItem.sellUnitPrice * fallbackRatio
           : existingItem.sellUnitPrice;
