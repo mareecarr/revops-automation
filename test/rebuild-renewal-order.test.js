@@ -409,9 +409,23 @@ test('lines the quote does not carry are left out, not invented', async () => {
   assert.strictEqual(period2, 790);
 });
 
-test('the rebuilt All Saints order reproduces the quoted total exactly', async () => {
-  const { createdOrder } = await runStep2(allSaintsCase());
-  assert.strictEqual(createdOrder.totalAmount, 72490.8);
+test('a negotiated tier the draft defaults away from goes to REVIEW, not a frozen price', async () => {
+  // All four billable charges are quoted on "Plus", which the single fresh
+  // draft defaults away from (it proposes "Core") — attributesWereRecovered
+  // is true for every one of them, charge renamed or not. The draft's own
+  // price is for the wrong tier, so it is not a usable anchor; the API has
+  // to resolve the real Plus-tier price, and this offline harness cannot
+  // know it either. Before this rule applied uniformly, a charge that
+  // happened NOT to be renamed (CHRG-TQ9CHVP, still on PLAN-CW65QFW) skipped
+  // that uncertainty and had its 2026 Plus price copied forward verbatim —
+  // which is the same frozen-old-price bug as ORD-16QXXQ8, just reached by
+  // a different route.
+  const { output } = await runStep2(allSaintsCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+  assert.strictEqual(output.new_order_status, 'REVIEW');
+  assert.strictEqual(output.needs_review, true);
+  assert.match(output.error_message, /CHRG-TQ9CHVP/);
 });
 
 test('the zeroed lines are reported with their seat count', async () => {
@@ -769,7 +783,7 @@ test('a line the API prices away from the quote holds the order back', async () 
   assert.strictEqual(output.needs_manual_rebuild, false, 'the rebuild worked; the catalog moved');
   assert.match(output.error_message, /3 line\(s\) priced away from the quote/);
   assert.match(output.error_message, /vs quoted 37\.67/);
-  // CHRG-Z16B0CQ is NOT in this list: repriceSwappedLine computed its price
+  // CHRG-Z16B0CQ is NOT in this list: repriceOffCurrentCatalog computed its price
   // itself (a deliberate, correct divergence from the old quote), where
   // these three went through the catalog fallback and were repriced by the
   // API unpredictably — that difference is exactly what this check exists
@@ -831,7 +845,7 @@ test('a catalog rise across a plan swap reaches the customer', async () => {
 
 test('a catalog rise carried correctly needs no review', async () => {
   // This is the fix working as intended, not an unpredictable API outcome —
-  // repriceSwappedLine computed the final price itself, so there is nothing
+  // repriceOffCurrentCatalog computed the final price itself, so there is nothing
   // here for a rep to check.
   const { output } = await runStep2(kingswoodCase());
 

@@ -268,12 +268,14 @@ exports.main = async (event, callback) => {
       return lineItem;
     };
 
-    // Carries the negotiated DISCOUNT PERCENTAGE across a plan swap onto the
-    // new charge's own catalog list price. Never the old absolute dollar
-    // amount: List Unit Price is only ever edited to express a price ABOVE
-    // the new catalog list (a genuine premium override, which a discount
-    // cannot express); a price at or below list is always a discount off
-    // whatever the current list is, never a markdown of the list itself.
+    // Carries the negotiated DISCOUNT PERCENTAGE onto the charge's own
+    // CURRENT catalog list price — draftItem's, whether the charge was
+    // renamed in a plan swap or is the very same chargeId as the quote.
+    // Never the old absolute dollar amount: List Unit Price is only ever
+    // edited to express a price ABOVE the current catalog list (a genuine
+    // premium override, which a discount cannot express); a price at or
+    // below list is always a discount off whatever the current list is,
+    // never a markdown of the list itself.
     //
     // This used to re-anchor the OLD absolute sell price onto the new base
     // via a listPriceOverrideRatio, which pins the price at whatever it was
@@ -283,13 +285,16 @@ exports.main = async (event, callback) => {
     // instead of the $47.45 the same 7.86% discount gives on the new list —
     // discount PERCENTAGES survive a catalog re-version, absolute prices do
     // not (see deriveDiscounts above), and this was doing the opposite.
+    // The same freeze happened on a charge that was never renamed at all
+    // (copyAbsolutePricing sending the quote's own old list verbatim) —
+    // this function now covers that case too; see the call site below.
     //
     // ONLY valid when the draft line's own attributes are the correct ones.
     // If attributes had to be recovered, the draft priced itself off the
     // wrong rate card row, its list is meaningless, and anchoring to it
     // would misprice the line once the API re-looks-up on the corrected
     // attributes. Those lines take the catalog+discount path instead.
-    const repriceSwappedLine = (lineItem, source, draftItem) => {
+    const repriceOffCurrentCatalog = (lineItem, source, draftItem) => {
       const newList = draftItem.listUnitPriceBeforeOverride != null
         ? draftItem.listUnitPriceBeforeOverride
         : draftItem.listUnitPrice;
@@ -1063,7 +1068,6 @@ exports.main = async (event, callback) => {
 
       const isCrossChargeMatch = existingMatch.via.indexOf('swapped') === 0
         || existingMatch.via.indexOf('cohort') === 0;
-      const isPlanSwap = !!draftItem.replacedPlanId || isCrossChargeMatch;
 
       // Recorded once per draft line, not once per period, so the summary
       // counts commercial lines rather than ramp replicas.
@@ -1169,39 +1173,43 @@ exports.main = async (event, callback) => {
       // prices there are placeholders the API resolves server-side against
       // whatever the current rate card says, which is exactly the case that
       // needs checking after creation. copyAbsolutePricing and
-      // repriceSwappedLine both compute the FINAL number themselves — a
-      // deliberate divergence from the old quote there (a catalog rise
+      // repriceOffCurrentCatalog both compute the FINAL number themselves —
+      // a deliberate divergence from the old quote there (a catalog rise
       // flowing through, say) is the fix working, not something to flag.
       let tookCatalogFallback = false;
-      if (!isPlanSwap) {
-        const priceSource = existingItem || draftItem;
-        lineItem = copyAbsolutePricing(lineItem, priceSource);
-        pricingMode = existingItem
-          ? `existing sell=${lineItem.sellUnitPrice}`
-          : `draft sell=${lineItem.sellUnitPrice}`;
-        if (!existingItem && lineItem.quantity > 0 && hasAnyIncrease) {
+      if (existingItem && existingItem.listPriceOverrideRatio != null) {
+        // A list price override on the existing renewal line is a
+        // negotiated price, not catalog drift, and must survive verbatim —
+        // whether or not the charge was renamed along the way.
+        lineItem = copyAbsolutePricing(lineItem, existingItem);
+        pricingMode = `override sell=${lineItem.sellUnitPrice}`;
+      } else if (existingItem && !attributesWereRecovered) {
+        // No negotiated override — a plain discount off list. Carry the
+        // discount PERCENTAGE onto the charge's CURRENT catalog list
+        // (draftItem's own) rather than the quote's OLD absolute price.
+        // This covers a renamed charge from a plan swap exactly as it
+        // covers one that was never renamed at all: draftItem.chargeId is
+        // the same either way, so its own list price is always current.
+        // Freezing the OLD price here is what put CHRG-6T5J1FH at $45.15 on
+        // ORD-16QXXQ8 after its catalog rose to $51.50.
+        lineItem = repriceOffCurrentCatalog(lineItem, existingItem, draftItem);
+        pricingMode = `carried list=${lineItem.listUnitPrice} sell=${lineItem.sellUnitPrice} disc=${lineItem.discounts.length ? `${Math.round(lineItem.discounts[0].percent * 10000) / 100}%` : '0%'}`;
+      } else if (!existingItem) {
+        // No quoted counterpart at all — the draft's own pricing is all
+        // there is.
+        lineItem = copyAbsolutePricing(lineItem, draftItem);
+        pricingMode = `draft sell=${lineItem.sellUnitPrice}`;
+        if (lineItem.quantity > 0 && hasAnyIncrease) {
           lineItem = applyUplift(lineItem, averageIncreaseRatio);
           pricingMode = `draft+uplift sell=${lineItem.sellUnitPrice}`;
         }
-      } else if (existingItem && existingItem.listPriceOverrideRatio != null) {
-        // A list price override on the existing renewal line is a
-        // negotiated price, not catalog drift, and must survive the swap.
-        // Dropping it and re-applying only the discount percentage prices
-        // the line off the full catalog rate instead of the agreed one.
-        lineItem = copyAbsolutePricing(lineItem, existingItem);
-        pricingMode = `swap+override sell=${lineItem.sellUnitPrice}`;
-      } else if (isCrossChargeMatch && existingItem && !attributesWereRecovered) {
-        // The draft priced itself on the right rate card row, so its list is
-        // trustworthy — carry the negotiated discount PERCENTAGE onto it
-        // rather than freezing the old absolute price across the swap.
-        lineItem = repriceSwappedLine(lineItem, existingItem, draftItem);
-        pricingMode = `swapped list=${lineItem.listUnitPrice} sell=${lineItem.sellUnitPrice} disc=${lineItem.discounts.length ? `${Math.round(lineItem.discounts[0].percent * 10000) / 100}%` : '0%'}`;
       } else {
-        // No negotiated override, or the draft's own pricing is unusable
-        // because its attributes were wrong. Let the API price from the new
-        // catalog on the corrected attributes and carry over only the
-        // version-independent discount percentage. list/sell here are
-        // placeholders that the API recomputes.
+        // existingItem matched, but its attributes had to be recovered: the
+        // draft priced itself off the wrong rate card row, so its own list
+        // is unusable. Let the API price from the current catalog on the
+        // corrected attributes and carry over only the version-independent
+        // discount percentage. list/sell here are placeholders that the
+        // API recomputes.
         lineItem.listUnitPrice = draftItem.listUnitPrice;
         lineItem.sellUnitPrice = draftItem.sellUnitPrice;
         const existingDiscounts = deriveDiscounts(existingItem);

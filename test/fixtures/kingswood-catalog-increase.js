@@ -16,7 +16,7 @@
 //
 // Deliberately kept unambiguous: both draft lines match their quoted
 // counterpart on quantity as well as attributes, so this exercises
-// repriceSwappedLine in isolation from the cohort-ambiguity guard.
+// repriceOffCurrentCatalog in isolation from the cohort-ambiguity guard.
 
 const RENEWAL_START = 1798714800;
 const RENEWAL_END = 1830250800;
