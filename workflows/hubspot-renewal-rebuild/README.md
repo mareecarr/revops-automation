@@ -97,8 +97,10 @@ there. Plan re-versions make that harder than it sounds: the charge underneath
 a line gets renamed, so the same item appears under one `chargeId` in the
 existing order and another in the draft. Matching therefore runs in passes —
 subscription charge UUID, then catalog charge id, then an exact attribute
-match, then a whole cohort of interchangeable lines paired positionally —
-so a stronger signal always claims a line before a weaker one can.
+match, then a whole cohort of interchangeable lines paired positionally by
+quantity, then that same cohort paired by attribute alone once a mid-term
+amendment has moved the quantity — so a stronger signal always claims a line
+before a weaker one can.
 
 ## Multi-year and ramped orders
 
@@ -252,6 +254,39 @@ charged $94.50 for the same 211 seats.
 Which of the two renews is a commercial decision, so this is now `MANUAL` and
 the message names the competing charges.
 
+### A mid-term amendment can outrun the cohort pass's use of quantity
+
+The cohort pass's positional pairing (above) buckets candidates by exact
+quantity as an extra safety check — reasonable, since quantity is normally a
+free, reliable signal. It stops being reliable the moment an amendment moves
+seats between the very charges a later plan swap renames.
+
+ORD-8DCTRDQ quotes CHRG-ZHFTN4X and CHRG-N9VNCEG at 299 and 325 seats, drafted
+against subscription version 2. By the time it was rebuilt, three mid-term
+amendments had taken the subscription to version 5, rebalancing those same
+two charges to 371 and 287. Then the 2027 catalog re-versioned both onto
+`PLAN-GHVVWF9`, renaming them to `CHRG-W9V9GW5` and `CHRG-PFR72B4`. The swap
+itself is completely unambiguous — two renamed charges, both carrying
+`replacedPlanId`, both the same attributes, quoted lines commercially
+identical to each other — but the quantity-bucketed cohort pass searches
+using the CURRENT (371, 287) quantity, which matches neither quoted line
+(299, 325), so every bucket comes up empty and the rebuild refused with
+"rebuilt quantity 0 … 2 quoted line(s) have no counterpart in the fresh
+draft", even though the fresh draft plainly did carry their successors.
+
+A second cohort pass now runs after the first, grouping only by attribute key
+(ignoring quantity entirely), reached only by draft lines that a plan swap
+actually renamed (`replacedPlanId` is set) and that no earlier pass could
+place. It pairs positionally exactly as the quantity-bucketed pass does —
+only when the count of remaining draft lines equals the count of remaining
+quoted candidates, and only when those candidates are commercially identical
+to each other apart from quantity. Quantity itself still comes from the
+matched quoted line once paired (299 and 325, not 371 and 287, and certainly
+not the subscription's 658-seat total) — this pass only changes how the
+*pairing* is found, never what quantity ends up on the built line. A genuine
+count mismatch (a charge added or dropped by the same amendment, say) still
+falls through unpaired and refuses, same as ever.
+
 ### The catalog can move under a line the rebuild cannot price
 
 A line whose attributes had to be recovered from the quote takes the
@@ -345,8 +380,9 @@ Runs the real step 2 file with `axios` stubbed, against fixtures built from
 real orders: ORD-39HY7JN (two-year ramped), ORD-WD9TZMR (lines the quote does
 not carry), ORD-9X3HCPP (Essential Assessment), ORD-7V4N727 (quoted quantities
 against a subscription that disagrees), ORD-YT4NWKB (the 211-seat cohort and
-the moved rate card) and ORD-16QXXQ8 (a catalog rise frozen out by an invented
-list price override). No network, no dependencies.
+the moved rate card), ORD-16QXXQ8 (a catalog rise frozen out by an invented
+list price override) and ORD-8DCTRDQ (a plan-swap cohort a mid-term amendment
+rebalanced out from under the quantity match). No network, no dependencies.
 
 The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
 a line sent down the catalog path is priced by the API and a stub that just

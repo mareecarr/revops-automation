@@ -26,6 +26,7 @@ const ea = require('./fixtures/essential-assessment.js');
 const dilworth = require('./fixtures/dilworth-single-period.js');
 const encounter = require('./fixtures/encounter-lutheran.js');
 const kingswood = require('./fixtures/kingswood-catalog-increase.js');
+const oxley = require('./fixtures/oxley-requoted-cohort.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -858,6 +859,76 @@ test('a catalog rise carried correctly needs no review', async () => {
   assert.strictEqual(output.new_order_status, 'DRAFT');
   assert.strictEqual(output.needs_review, false);
   assert.strictEqual(output.error_message, '');
+});
+
+// ==================================================
+// ORD-8DCTRDQ / SUB-JYYK6QP — Oxley Christian College
+//
+// Refused with "rebuilt quantity 0 in period 1 is below the 624 quoted —
+// 2 quoted line(s) have no counterpart in the fresh draft". Both quoted
+// charges (CHRG-ZHFTN4X 299, CHRG-N9VNCEG 325) WERE renamed by a genuine
+// plan re-version (PLAN-CMJB619 -> PLAN-GHVVWF9, both draft lines carry
+// replacedPlanId) — but the cohort pass buckets by exact quantity, and
+// three mid-term amendments between the quote and now rebalanced seats on
+// those same two charges to 371/287. Neither current quantity matches
+// either quoted one, so every bucket comes up empty and nothing pairs.
+// ==================================================
+const oxleyCase = (overrides = {}) => ({
+  subscription: oxley.buildSubscription(),
+  existingOrder: oxley.buildExistingOrder(),
+  draftRenewal: oxley.buildDraftRenewal(),
+  ...overrides
+});
+
+test('a plan swap survives seats being rebalanced by a mid-term amendment', async () => {
+  const { posted, output } = await runStep2(oxleyCase());
+
+  assert.strictEqual(output.new_order_created, true, output.error_message);
+  assert.strictEqual(output.new_order_status, 'DRAFT');
+
+  // The quote's OWN quantities (299, 325) — not the amended 371/287 the
+  // draft itself proposes, and not the 658-seat subscription total either.
+  const [big] = linesFor(posted, 'CHRG-W9V9GW5');
+  const [small] = linesFor(posted, 'CHRG-PFR72B4');
+  assert.strictEqual(big.quantity, 299);
+  assert.strictEqual(small.quantity, 325);
+
+  const billable = posted.lineItems.filter(i => i.quantity > 0);
+  assert.strictEqual(billable.length, 2);
+  assert.strictEqual(billable.reduce((s, i) => s + i.quantity, 0), 624);
+
+  // Price and Year Groups both carried from the matched quoted line.
+  assert.strictEqual(big.sellUnitPrice, 48.3);
+  assert.strictEqual(yearsOf(big), '7; 8; 9; 10');
+
+  assert.strictEqual(output.new_order_total, 30139.2);
+});
+
+test('an amendment-driven seat imbalance is noted, not fatal', async () => {
+  const messages = [];
+  const realError = console.error;
+  console.error = (...args) => messages.push(args.map(String).join(' '));
+  try {
+    await runStep2(oxleyCase());
+  } finally {
+    console.error = realError;
+  }
+
+  assert.ok(
+    messages.some(m => /period 1 carries 624 seats where the subscription's renewing charges carry 658/.test(m)),
+    `expected the shortfall vs subscription to be noted, got:\n${messages.join('\n')}`);
+});
+
+test('a genuine count mismatch in a requoted cohort still refuses', async () => {
+  // Drop one of the two renamed draft lines: now one draft charge is
+  // chasing two quoted candidates with no quantity to break the tie either
+  // way — the count no longer matches, so pairing is not attempted.
+  const { posted, output } = await runStep2(oxleyCase({
+    draftRenewal: oxley.buildDraftRenewal({ dropCharge: 'CHRG-PFR72B4' })
+  }));
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.strictEqual(output.new_order_status, 'MANUAL');
 });
 
 // ==================================================

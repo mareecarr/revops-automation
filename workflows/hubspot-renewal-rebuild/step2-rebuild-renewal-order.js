@@ -846,6 +846,61 @@ exports.main = async (event, callback) => {
         cohortNotes.push(`qty ${quantity}: ${indexes.length} draft line(s) paired to ${candidates.length} existing line(s)`);
       }
 
+      // Pass 4 — cohort swap, ignoring quantity.
+      //
+      // Pass 3 buckets by quantity because that is normally a free,
+      // reliable extra signal. It stops being reliable the moment a
+      // mid-term amendment moves seats between the very charges being
+      // renamed: SUB-JYYK6QP's contract quoted CHRG-ZHFTN4X/CHRG-N9VNCEG at
+      // 299/325, then an amendment rebalanced them to 371/287 before the
+      // 2027 catalog re-versioned both onto PLAN-GHVVWF9. Every quantity
+      // bucket in Pass 3 comes up empty — 371 and 287 match neither 299 nor
+      // 325 — even though the swap itself is completely unambiguous: two
+      // draft lines, both carrying replacedPlanId, both the same
+      // attributes, against two quoted lines that are commercially
+      // identical to each other.
+      //
+      // Only reached by draft lines a plan swap actually renamed
+      // (replacedPlanId is set) that Pass 1-3 could not place. Grouped by
+      // attribute key alone; paired only when the count matches exactly
+      // and the quoted candidates are commercially identical to each other
+      // apart from quantity — the same safety argument as Pass 3, just
+      // without quantity as part of the identity. Quantity itself still
+      // comes from the matched quoted line once paired, never from here.
+      const unmatchedByAttribute = new Map();
+      resolutions.forEach(({ item: draftItem, charge }, index) => {
+        if (matches[index].item) return;
+        if (!draftItem.replacedPlanId) return;
+        const quantity = targetQuantityFor(draftItem, charge);
+        if (!quantity) return;
+        const attributeKey = buildAttributeKey(
+          (charge && charge.attributeReferences && charge.attributeReferences.length
+            ? charge.attributeReferences
+            : draftItem.attributeReferences));
+        if (!unmatchedByAttribute.has(attributeKey)) unmatchedByAttribute.set(attributeKey, []);
+        unmatchedByAttribute.get(attributeKey).push(index);
+      });
+
+      for (const [attributeKey, indexes] of unmatchedByAttribute) {
+        const candidates = pool.filter(i => !used.has(i)
+          && i.quantity > 0
+          && buildAttributeKey(i.attributeReferences) === attributeKey);
+        if (candidates.length === 0) continue;
+        if (candidates.length !== indexes.length) {
+          cohortNotes.push(`attrs ${attributeKey}: ${indexes.length} draft line(s) vs ${candidates.length} existing line(s) at mismatched quantities — not paired`);
+          continue;
+        }
+
+        const signatures = new Set(candidates.map(commercialSignature));
+        if (signatures.size !== 1) {
+          cohortNotes.push(`attrs ${attributeKey}: ${candidates.length} candidates differ — not paired`);
+          continue;
+        }
+
+        indexes.forEach((index, position) => claim(index, candidates[position], 'cohort/requoted'));
+        cohortNotes.push(`attrs ${attributeKey}: ${indexes.length} draft line(s) paired to ${candidates.length} existing line(s) at requoted quantities`);
+      }
+
       return { matches, cohortNotes, ambiguousCohorts };
     };
 
