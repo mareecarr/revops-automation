@@ -419,6 +419,25 @@ exports.main = async (event, callback) => {
     const draftLineItems = newOrder.lineItems || [];
     console.log(`Fresh draft lines=${draftLineItems.length}`);
 
+    // A draft that offers ZERO quantity on every single line is a different
+    // problem from a matching gap, and matching can't fix it: there is
+    // nothing billable anywhere in the fresh draft to match against, renamed
+    // or not. SUB-FFPG3KT's draftRenewal came back with 10 lines, every one
+    // at quantity 0 — including the successor of CHRG-RHX8VCN, a genuinely
+    // paid $6,480 line still live on the subscription today. No amount of
+    // cohort logic invents a quantity Subskribe itself did not propose.
+    //
+    // Reported distinctly, before matching runs, so the message says what
+    // is actually wrong rather than naming individual "unmatched" charges —
+    // which reads like a matching failure and sends the wrong person
+    // chasing the wrong problem.
+    const existingBillableQuantity = existingLineItems.reduce((s, i) => s + (i.quantity || 0), 0);
+    if (draftLineItems.length > 0
+      && existingBillableQuantity > 0
+      && !draftLineItems.some(i => (i.quantity || 0) > 0)) {
+      throw refuse(OUTCOME.MANUAL, `the fresh draft for ${subscriptionId} proposes zero quantity on every one of its ${draftLineItems.length} line item(s), while ${existingRenewalOrderId} quotes ${existingBillableQuantity} seat(s) across ${existingLineItems.filter(i => i.quantity > 0).length} line(s) — this looks like a Subskribe-side renewal computation issue, not a matching gap. Check the subscription's renewal setup in Subskribe before rebuilding this one by hand.`);
+    }
+
     // ==================================================
     // SEGMENT PLAN — MULTI-YEAR / RAMPED ORDERS
     //

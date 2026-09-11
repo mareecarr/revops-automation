@@ -198,6 +198,10 @@ Step 2 refuses to create an order rather than create a wrong one:
   quoted for
 - more interchangeable draft lines at one seat count than the quote carries
   there — see below
+- a fresh draft that proposes zero quantity on **every single line**, while
+  the quote carries billable seats. Checked before matching runs, and
+  reported as its own thing rather than the generic "no counterpart" message
+  the same shortfall would otherwise produce — see below
 
 ## The quote is the spec, not the subscription
 
@@ -286,6 +290,26 @@ not the subscription's 658-seat total) — this pass only changes how the
 *pairing* is found, never what quantity ends up on the built line. A genuine
 count mismatch (a charge added or dropped by the same amendment, say) still
 falls through unpaired and refuses, same as ever.
+
+### An empty draft is not a matching problem, and shouldn't read like one
+
+Every guard rail above assumes the fresh draft has *something* on it that
+matching could, in principle, find — a renamed charge, a shifted quantity, an
+ambiguous cohort. Sometimes it has nothing at all: `draftRenewal` for
+SUB-FFPG3KT came back with ten line items, every single one at quantity 0 —
+including the successor of CHRG-RHX8VCN, a genuinely paid $6,480 charge
+(132.30 x 41 seats, no discount) still live on the subscription. The quote
+asks for 192 seats across four charges; the fresh draft offers none of them,
+paid or complimentary.
+
+No cohort pass, however clever, invents a quantity Subskribe itself never
+proposed. This is checked for and refused **before** matching runs, with its
+own message, rather than falling through to the ordinary "N quoted line(s)
+have no counterpart" report — that message reads as a matching failure and
+sends whoever is looking at it hunting for a chargeId problem that isn't
+there. The real question here is why Subskribe's own renewal computation for
+this subscription came back empty, which is outside anything this rebuild
+can fix — a rep needs to look at the subscription's renewal setup directly.
 
 ### The catalog can move under a line the rebuild cannot price
 
@@ -381,8 +405,10 @@ real orders: ORD-39HY7JN (two-year ramped), ORD-WD9TZMR (lines the quote does
 not carry), ORD-9X3HCPP (Essential Assessment), ORD-7V4N727 (quoted quantities
 against a subscription that disagrees), ORD-YT4NWKB (the 211-seat cohort and
 the moved rate card), ORD-16QXXQ8 (a catalog rise frozen out by an invented
-list price override) and ORD-8DCTRDQ (a plan-swap cohort a mid-term amendment
-rebalanced out from under the quantity match). No network, no dependencies.
+list price override), ORD-8DCTRDQ (a plan-swap cohort a mid-term amendment
+rebalanced out from under the quantity match) and ORD-7723YDP (a fresh draft
+offering zero quantity everywhere, paid and complimentary lines alike). No
+network, no dependencies.
 
 The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
 a line sent down the catalog path is priced by the API and a stub that just

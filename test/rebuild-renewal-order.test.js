@@ -27,6 +27,7 @@ const dilworth = require('./fixtures/dilworth-single-period.js');
 const encounter = require('./fixtures/encounter-lutheran.js');
 const kingswood = require('./fixtures/kingswood-catalog-increase.js');
 const oxley = require('./fixtures/oxley-requoted-cohort.js');
+const gulf = require('./fixtures/gulf-empty-draft.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -929,6 +930,37 @@ test('a genuine count mismatch in a requoted cohort still refuses', async () => 
 
   assert.strictEqual(posted, null, 'nothing may be created');
   assert.strictEqual(output.new_order_status, 'MANUAL');
+});
+
+// ==================================================
+// ORD-7723YDP / SUB-FFPG3KT — Gulf Christian College
+//
+// Not a matching bug: the fresh draft came back with ten line items, every
+// single one at quantity 0 — including the successor of CHRG-RHX8VCN, a
+// genuinely paid $6,480 charge still live on the subscription with no
+// discount at all. No cohort logic can invent a quantity Subskribe itself
+// never proposed, so this has to be reported as its own thing rather than
+// as an ordinary "quoted lines have no counterpart" matching failure.
+// ==================================================
+const gulfCase = (overrides = {}) => ({
+  subscription: gulf.buildSubscription(),
+  existingOrder: gulf.buildExistingOrder(),
+  draftRenewal: gulf.buildDraftRenewal(),
+  ...overrides
+});
+
+test('a fresh draft offering zero quantity everywhere is its own MANUAL case', async () => {
+  const { posted, output } = await runStep2(gulfCase());
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.strictEqual(output.new_order_status, 'MANUAL');
+  assert.strictEqual(output.needs_manual_rebuild, true);
+  assert.match(output.error_message, /zero quantity on every one of its 10 line item\(s\)/);
+  assert.match(output.error_message, /192 seat\(s\)/);
+  assert.match(output.error_message, /Subskribe-side renewal computation issue/);
+  // Not the generic per-charge matching message — this is a different
+  // problem and should not be described as if it were the same one.
+  assert.doesNotMatch(output.error_message, /no counterpart in the fresh draft/);
 });
 
 // ==================================================
