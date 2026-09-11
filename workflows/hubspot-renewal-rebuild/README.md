@@ -202,6 +202,10 @@ Step 2 refuses to create an order rather than create a wrong one:
   the quote carries billable seats. Checked before matching runs, and
   reported as its own thing rather than the generic "no counterpart" message
   the same shortfall would otherwise produce — see below
+- quoted lines sharing one attribute key but negotiated at more than one
+  price, whose fresh-draft successors collide on that same attribute key with
+  nothing left to tell them apart — reported by price point and seat count
+  rather than the generic "no counterpart" message — see below
 
 ## The quote is the spec, not the subscription
 
@@ -311,6 +315,42 @@ there. The real question here is why Subskribe's own renewal computation for
 this subscription came back empty, which is outside anything this rebuild
 can fix — a rep needs to look at the subscription's renewal setup directly.
 
+### Two negotiated prices under one attribute pair collapse into one signal
+
+The attribute-key cohort pass (above) treats "same attributes" as enough of a
+signal to pair renamed charges positionally — but only once it has confirmed
+every remaining candidate at that attribute key is commercially identical to
+the others. Sometimes it isn't, and no later pass can rescue that.
+
+ORD-V0ZZV09 quotes five charges under the exact same "Core + Independent"
+pair at three different negotiated prices: 15 seats at $44.10 (Years 10), 773
++ 773 seats at $24.05 (Years 7-9), and 773 + 773 seats at $0 — one at list $49,
+one at list $25.50, both 100% discounted, both Years 7-9. A 2027 catalog
+re-version renames all five onto new chargeIds, carries no Year Groups across,
+and drops every one of them onto "Core + Independent" with nothing else to
+tell them apart. Pass 1-3 can't place any of them (chargeId renamed,
+quantities drifted from three intervening amendments), and the attribute-key
+cohort pass finds real candidates on both sides but refuses once their
+signatures disagree — correctly: pairing the wrong two would silently swap
+$24.05/seat for $0/seat on hundreds of seats.
+
+This is a different failure from "no counterpart at all" (below), and reads
+better named as what it is: the refusal names the number of distinct price
+points, and the seats and sell price at each one, rather than just listing
+raw chargeIds and leaving whoever picks it up to re-derive the same table by
+hand. It only fires once a genuine colliding cohort has actually been found —
+a line dropped from the draft entirely under a shared attribute key still
+reports as the ordinary "no counterpart" case just below, since there is no
+colliding successor to point at.
+
+The grouping for that report is by sell price and Year Groups, not raw list
+price: two quoted lines that differ only in list price rebuild to the exact
+same line once `repriceOffCurrentCatalog` (below) replaces List Unit Price
+with the fresh draft's own catalog figure regardless of what the quote
+carried — so reporting them as separate "price points" would flag an
+ambiguity with no dollar consequence. ORD-V0ZZV09's two $0/100%-discount
+lines (list $49 and list $25.50) report as one price point of $0, not two.
+
 ### The catalog can move under a line the rebuild cannot price
 
 A line whose attributes had to be recovered from the quote takes the
@@ -406,9 +446,10 @@ not carry), ORD-9X3HCPP (Essential Assessment), ORD-7V4N727 (quoted quantities
 against a subscription that disagrees), ORD-YT4NWKB (the 211-seat cohort and
 the moved rate card), ORD-16QXXQ8 (a catalog rise frozen out by an invented
 list price override), ORD-8DCTRDQ (a plan-swap cohort a mid-term amendment
-rebalanced out from under the quantity match) and ORD-7723YDP (a fresh draft
-offering zero quantity everywhere, paid and complimentary lines alike). No
-network, no dependencies.
+rebalanced out from under the quantity match), ORD-7723YDP (a fresh draft
+offering zero quantity everywhere, paid and complimentary lines alike) and
+ORD-V0ZZV09 (three negotiated prices collapsing onto one attribute key once
+their charges are renamed). No network, no dependencies.
 
 The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
 a line sent down the catalog path is priced by the API and a stub that just

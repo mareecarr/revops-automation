@@ -1461,6 +1461,72 @@ exports.main = async (event, callback) => {
       if (rebuiltQuantity < quotedQuantity) {
         const unmatchedQuoted = existingLineItems
           .filter(i => i.quantity > 0 && !matchedExistingItems.has(i));
+
+        // Several quoted lines can share the exact same attributes yet have
+        // been negotiated at genuinely different prices (different Year
+        // Groups, different discounts) — e.g. one 100%-discounted line and
+        // one paid line, both "Core + Independent". When a plan re-version
+        // renames the charges underneath them, their fresh-draft successors
+        // can end up looking identical to each other too, so there is no
+        // signal left — not chargeId, not attributes, not price — to say
+        // which seats belong at which price. That is a different problem
+        // from a line simply having no successor at all: naming it here
+        // saves whoever picks this up from re-deriving it from the raw
+        // chargeIds.
+        // Sell price + Year Groups is the actual dollar outcome — list price
+        // is not, once a line goes through repriceOffCurrentCatalog: it gets
+        // replaced with the fresh draft's own catalog list regardless of
+        // what the quote carried, so two quoted lines that differ only in
+        // list price still rebuild to the exact same line. Grouping on list
+        // price too would report an "ambiguity" that has no dollar
+        // consequence at all.
+        const collapseSignature = (item) => [
+          item.sellUnitPrice == null ? '' : item.sellUnitPrice,
+          getYearsValue(item)
+        ].join('|');
+        // A line that simply has no successor at all in the draft (omitted
+        // from the plan entirely) can share this same attribute key too —
+        // that is the ordinary "no counterpart" case below, not this one.
+        // What actually distinguishes a genuine collapse is Pass 4 having
+        // found real draft candidates under this attribute key and refused
+        // to pair them because they weren't commercially identical — so
+        // only reach for this message when that cohort note exists.
+        const cohortNotesForPeriod = segmentMatchSets[k].cohortNotes
+          .concat(isMultiSegment ? fullSpanMatchSet.cohortNotes : []);
+        const hasCollidingDraftSuccessors = (attributeKey) => cohortNotesForPeriod
+          .some(note => note.startsWith(`attrs ${attributeKey}:`) && note.includes('candidates differ'));
+
+        const unmatchedByAttrs = new Map();
+        unmatchedQuoted.forEach(item => {
+          const key = buildAttributeKey(item.attributeReferences);
+          if (!unmatchedByAttrs.has(key)) unmatchedByAttrs.set(key, []);
+          unmatchedByAttrs.get(key).push(item);
+        });
+        let collapsedGroup = null;
+        for (const [key, items] of unmatchedByAttrs) {
+          if (hasCollidingDraftSuccessors(key) && new Set(items.map(collapseSignature)).size > 1) {
+            collapsedGroup = items;
+            break;
+          }
+        }
+
+        if (collapsedGroup) {
+          const clusters = new Map();
+          collapsedGroup.forEach(item => {
+            const key = collapseSignature(item);
+            if (!clusters.has(key)) {
+              clusters.set(key, { sell: item.sellUnitPrice, years: getYearsValue(item), seats: 0, count: 0 });
+            }
+            const cluster = clusters.get(key);
+            cluster.seats += item.quantity || 0;
+            cluster.count += 1;
+          });
+          const description = [...clusters.values()]
+            .map(c => `${c.count} line(s)/${c.seats} seat(s) @ $${c.sell}${c.years ? ` (${c.years})` : ''}`)
+            .join(', ');
+          throw refuse(OUTCOME.MANUAL, `${collapsedGroup.length} quoted line(s) on ${existingRenewalOrderId} share the same attributes but were negotiated at ${clusters.size} different price points (${description}) — their fresh-draft successors are indistinguishable from each other, so nothing tells the rebuild which seats belong at which price. Reconcile this one by hand rather than risk swapping a price across real seats.`);
+        }
+
         const shownUnmatched = unmatchedQuoted.slice(0, 4)
           .map(i => `${i.chargeId}(${i.quantity})`).join(' ');
         throw refuse(OUTCOME.MANUAL, `rebuilt quantity ${rebuiltQuantity} in period ${k + 1} is below the ${quotedQuantity} quoted on ${existingRenewalOrderId}${unmatchedQuoted.length ? ` — ${unmatchedQuoted.length} quoted line(s) have no counterpart in the fresh draft: ${shownUnmatched}${unmatchedQuoted.length > 4 ? ` +${unmatchedQuoted.length - 4}` : ''}` : ' — line items were dropped'}`);

@@ -28,6 +28,7 @@ const encounter = require('./fixtures/encounter-lutheran.js');
 const kingswood = require('./fixtures/kingswood-catalog-increase.js');
 const oxley = require('./fixtures/oxley-requoted-cohort.js');
 const gulf = require('./fixtures/gulf-empty-draft.js');
+const emmaus = require('./fixtures/emmaus-collapsed-price-tiers.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -961,6 +962,62 @@ test('a fresh draft offering zero quantity everywhere is its own MANUAL case', a
   // Not the generic per-charge matching message — this is a different
   // problem and should not be described as if it were the same one.
   assert.doesNotMatch(output.error_message, /no counterpart in the fresh draft/);
+});
+
+// ==================================================
+// ORD-V0ZZV09 / SUB-DZE4XNV — Emmaus College
+//
+// Not a "no successor" gap either: the fresh draft DOES offer successor
+// lines for every one of the five ambiguous quoted charges — they just
+// can't be told apart from each other once re-versioned, because the quote
+// negotiated three different price points under the exact same attribute
+// pair. Pairing them by guesswork would risk swapping $24.05/seat for $0
+// on hundreds of seats, so this has to name the real cause rather than
+// read like an ordinary matching failure.
+// ==================================================
+const emmausCase = (overrides = {}) => ({
+  subscription: emmaus.buildSubscription(),
+  existingOrder: emmaus.buildExistingOrder(),
+  draftRenewal: emmaus.buildDraftRenewal(),
+  ...overrides
+});
+
+test('quoted lines negotiated at different prices under identical attributes stay MANUAL', async () => {
+  const { posted, output } = await runStep2(emmausCase());
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.strictEqual(output.new_order_status, 'MANUAL');
+  assert.strictEqual(output.needs_manual_rebuild, true);
+  assert.match(output.error_message, /5 quoted line\(s\) on ORD-V0ZZV09 share the same attributes/);
+  assert.match(output.error_message, /3 different price points/);
+  assert.match(output.error_message, /1 line\(s\)\/15 seat\(s\) @ \$44\.1 \(10\)/);
+  assert.match(output.error_message, /2 line\(s\)\/1546 seat\(s\) @ \$24\.05 \(7; 8; 9\)/);
+  assert.match(output.error_message, /2 line\(s\)\/1546 seat\(s\) @ \$0 \(7; 8; 9\)/);
+  // Not the generic per-charge matching message, and not the empty-draft
+  // message either — this is its own distinct cause.
+  assert.doesNotMatch(output.error_message, /no counterpart in the fresh draft/);
+  assert.doesNotMatch(output.error_message, /zero quantity on every one/);
+});
+
+test('a genuinely dropped charge under shared attributes is still the ordinary no-counterpart message', async () => {
+  // Same attribute-key collision on the QUOTED side (three price points
+  // under Core + Independent), but this time the draft has no successor
+  // at all for the $0/seat pair — there is no colliding candidate to
+  // report, so this must fall through to the generic message rather than
+  // falsely claiming the draft's successors are "indistinguishable".
+  const { posted, output } = await runStep2(emmausCase({
+    draftRenewal: (() => {
+      const draft = emmaus.buildDraftRenewal();
+      draft.lineItems = draft.lineItems.filter(i =>
+        i.chargeId !== 'CHRG-DZCPWQC' && i.chargeId !== 'CHRG-FJ0TYZK');
+      return draft;
+    })()
+  }));
+
+  assert.strictEqual(posted, null, 'nothing may be created');
+  assert.strictEqual(output.new_order_status, 'MANUAL');
+  assert.match(output.error_message, /quoted line\(s\) have no counterpart in the fresh draft/);
+  assert.doesNotMatch(output.error_message, /different price points/);
 });
 
 // ==================================================
