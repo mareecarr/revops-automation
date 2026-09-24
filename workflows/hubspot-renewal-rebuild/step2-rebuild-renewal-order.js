@@ -76,6 +76,18 @@ exports.main = async (event, callback) => {
     const READ_TIMEOUT = 5000;
     const WRITE_TIMEOUT = 4000;
 
+    // The plan lookups behind Pass 1.5 are an enhancement, not core data —
+    // the three calls above them (subscription, order, draftRenewal) are
+    // sequential and already burn up to 3 x READ_TIMEOUT in the worst case,
+    // leaving little of the 20s budget for anything else. An order that
+    // references many distinct plans (a real one has been seen with five on
+    // the existing order alone, more once the draft's own plans are added)
+    // must not be allowed to add another full READ_TIMEOUT on top of that
+    // and risk the action being killed mid-flight with no output at all —
+    // worse than just not having the subject match. Kept short and tight:
+    // losing this signal falls through to the ordinary matching passes.
+    const PLAN_LOOKUP_TIMEOUT = 2000;
+
     // A ramped order is quoted period by period. More than a handful of
     // periods means something is being read wrongly, not that a six-year
     // ramp was negotiated — refuse rather than post a payload nobody
@@ -1126,20 +1138,40 @@ exports.main = async (event, callback) => {
 
     const chargeIdToSubjectKey = new Map();
     const planIdList = [...planIds];
-    const planFetches = await Promise.allSettled(
-      planIdList.map(planId => axios.get(`${API_BASE}/plans/${planId}`, { headers: authHeaders, timeout: READ_TIMEOUT }))
-    );
-    planFetches.forEach((result, index) => {
-      if (result.status !== 'fulfilled') {
-        console.log(`Plan lookup failed for ${planIdList[index]}: ${result.reason && result.reason.message}`);
-        return;
+    if (planIdList.length > 0) {
+      // Per-request timeout alone isn't the whole guarantee — it caps a
+      // single slow plan, but not the phase as a whole if something odd
+      // happens to axios's own timeout (a stalled DNS lookup, a connection
+      // that never establishes). An explicit outer deadline is the actual
+      // budget: however many plans there are, however they behave, this
+      // step gives up after PLAN_LOOKUP_BUDGET_MS and the run continues
+      // with whatever it already had — never the run itself getting killed
+      // by HubSpot's 20s ceiling because of an enhancement.
+      const PLAN_LOOKUP_BUDGET_MS = 3000;
+      const timedOut = Symbol('plan-lookup-timeout');
+      const planFetches = await Promise.race([
+        Promise.allSettled(
+          planIdList.map(planId => axios.get(`${API_BASE}/plans/${planId}`, { headers: authHeaders, timeout: PLAN_LOOKUP_TIMEOUT }))
+        ),
+        new Promise(resolve => setTimeout(() => resolve(timedOut), PLAN_LOOKUP_BUDGET_MS))
+      ]);
+
+      if (planFetches === timedOut) {
+        console.log(`Plan lookups exceeded the ${PLAN_LOOKUP_BUDGET_MS}ms budget across ${planIdList.length} plan(s) — skipped`);
+      } else {
+        planFetches.forEach((result, index) => {
+          if (result.status !== 'fulfilled') {
+            console.log(`Plan lookup failed for ${planIdList[index]}: ${result.reason && result.reason.message}`);
+            return;
+          }
+          const plan = result.value.data;
+          (plan.charges || []).forEach(charge => {
+            const key = chargeSubjectKey(charge);
+            if (key) chargeIdToSubjectKey.set(charge.id, key);
+          });
+        });
       }
-      const plan = result.value.data;
-      (plan.charges || []).forEach(charge => {
-        const key = chargeSubjectKey(charge);
-        if (key) chargeIdToSubjectKey.set(charge.id, key);
-      });
-    });
+    }
     if (chargeIdToSubjectKey.size > 0) {
       console.log(`Catalog subjects resolved for ${chargeIdToSubjectKey.size} charge(s) across ${planIdList.length} plan(s)`);
     }

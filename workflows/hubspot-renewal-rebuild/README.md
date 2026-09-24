@@ -398,6 +398,24 @@ subscription-charge resolver from linking either to a specific charge at
 all — subject alone still places each correctly, because each is the only
 candidate in its own family, with nothing else there to confuse it with.
 
+**A plan-heavy order can spend the whole 20s budget on this enhancement
+alone.** The three calls ahead of it (subscription, order, draftRenewal) are
+sequential and already burn up to 3 x `READ_TIMEOUT` in the worst case; a
+real order has been seen referencing five distinct plans on its existing
+order alone, more once the draft's own plans are added. `Promise.allSettled`
+already runs the plan fetches in parallel, so the phase is normally bounded
+by the single slowest request rather than their sum — but that guarantee
+depends on axios's own `timeout` actually firing, and a stalled DNS lookup
+or a connection that never establishes doesn't always respect it. So the
+whole phase also carries its own hard outer deadline
+(`PLAN_LOOKUP_BUDGET_MS`, `Promise.race`d against the real fetches) on top
+of a tighter per-request timeout (`PLAN_LOOKUP_TIMEOUT`, shorter than the
+`READ_TIMEOUT` used everywhere else) — however many plans there are,
+however they behave, this step gives up on its own schedule and the run
+continues with whatever subjects it already resolved. Losing this signal
+falls through to the ordinary matching passes; losing the whole run to
+HubSpot's 20s kill switch over an enhancement would not.
+
 ### The catalog can move under a line the rebuild cannot price
 
 A line whose attributes had to be recovered from the quote takes the
@@ -499,8 +517,9 @@ ORD-V0ZZV09, twice over: once with no catalog data available (three
 negotiated prices collapsing onto one attribute key once their charges are
 renamed, correctly refused) and once with the real `GET /plans/{id}`
 responses stubbed in (`emmaus-catalog-subjects.js`), proving the same order
-resolves cleanly via Pass 1.5's Charge_Subjects lookup. No network, no
-dependencies.
+resolves cleanly via Pass 1.5's Charge_Subjects lookup — including a plan
+lookup that never responds at all, proving the phase's own deadline caps
+the wait rather than riding it out. No network, no dependencies.
 
 The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
 a line sent down the catalog path is priced by the API and a stub that just

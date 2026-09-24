@@ -38,7 +38,7 @@ const round2 = (value) => Math.round(value * 100) / 100;
 // `reprice` stands in for Subskribe pricing a line itself: the API recomputes
 // any line sent down the catalog path, and the created order comes back with
 // its numbers, not ours.
-const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit, reprice, plans }) => {
+const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit, reprice, plans, hangPlanId }) => {
   const enrolledSubscriptionId = subscriptionId || subscription.id;
   let posted = null;
   let createdOrder = null;
@@ -48,6 +48,11 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptio
       if (url.endsWith('/draftRenewal')) return { data: draftRenewal };
       const planMatch = url.match(/\/plans\/([^/]+)$/);
       if (planMatch) {
+        // Simulates a plan endpoint that never responds — real axios would
+        // eventually time out on its own `timeout` option, but the stub
+        // doesn't enforce that, so this stands in for "far slower than the
+        // step's own overall plan-lookup budget" without an actual wait.
+        if (planMatch[1] === hangPlanId) return new Promise(() => {});
         const plan = plans && plans[planMatch[1]];
         if (!plan) throw new Error(`No stubbed plan for ${planMatch[1]}`);
         return { data: plan };
@@ -1113,6 +1118,20 @@ test('a plan lookup that fails is tolerated, not fatal', async () => {
   // The families PLAN-CMJB619/PLAN-GHVVWF9 still resolve; only the
   // PDHPE/Technology pair (on the now-unfetchable plan) can't place —
   // still MANUAL, but for a real, narrower reason, not a crash.
+  assert.notStrictEqual(output.new_order_status, 'ERROR', output.error_message);
+});
+
+test('a plan lookup that never responds does not block the rebuild past its own budget', async () => {
+  // The real risk this guards against: an order referencing several
+  // distinct plans, on an account where one plan endpoint is slow or
+  // unreachable, must not let the whole run ride the full HubSpot 20s
+  // ceiling waiting on it. The overall lookup phase gives up on its own
+  // fixed budget and the run continues without that plan's subjects.
+  const start = Date.now();
+  const { output } = await runStep2(emmausSubjectsCase({ hangPlanId: 'PLAN-CMJB619' }));
+  const elapsed = Date.now() - start;
+
+  assert.ok(elapsed < 5000, `expected the plan-lookup budget to cap total time, took ${elapsed}ms`);
   assert.notStrictEqual(output.new_order_status, 'ERROR', output.error_message);
 });
 
