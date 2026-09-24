@@ -37,7 +37,7 @@ const round2 = (value) => Math.round(value * 100) / 100;
 // `reprice` stands in for Subskribe pricing a line itself: the API recomputes
 // any line sent down the catalog path, and the created order comes back with
 // its numbers, not ours.
-const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit, reprice }) => {
+const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptionId, businessUnit, reprice, plans }) => {
   const enrolledSubscriptionId = subscriptionId || subscription.id;
   let posted = null;
   let createdOrder = null;
@@ -45,6 +45,12 @@ const runStep2 = async ({ subscription, existingOrder, draftRenewal, subscriptio
   axiosStub.__reset({
     get: async (url) => {
       if (url.endsWith('/draftRenewal')) return { data: draftRenewal };
+      const planMatch = url.match(/\/plans\/([^/]+)$/);
+      if (planMatch) {
+        const plan = plans && plans[planMatch[1]];
+        if (!plan) throw new Error(`No stubbed plan for ${planMatch[1]}`);
+        return { data: plan };
+      }
       if (url.includes('/subscriptions/')) return { data: subscription };
       if (url.includes('/orders/')) return { data: existingOrder };
       throw new Error(`Unexpected GET ${url}`);

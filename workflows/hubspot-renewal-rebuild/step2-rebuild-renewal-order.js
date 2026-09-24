@@ -170,6 +170,21 @@ exports.main = async (event, callback) => {
 
     const getYearsValue = (item) => normaliseYearsValue(getYearsCustomField(item)?.value);
 
+    // A charge's catalog identity, independent of chargeId, attributes or
+    // quantity — used only for the plan-fetched catalog subject match
+    // below. "Charge_Subjects" is the school-subject picklist EP's catalog
+    // carries on (almost) every charge and survives a plan re-version
+    // untouched; itemCode is the fallback for the rare charge with no
+    // subject set (it agrees with Charge_Subjects everywhere checked, just
+    // with an inconsistent "AUS_" vs "Aus_" prefix, hence the lower-case).
+    const chargeSubjectKey = (charge) => {
+      const subjectField = getCustomFieldsArray(charge).find(cf => cf.name === 'Charge_Subjects');
+      const subjectValue = subjectField && subjectField.value;
+      if (subjectValue) return `subject:${subjectValue}`;
+      if (charge.itemCode) return `itemCode:${String(charge.itemCode).toLowerCase()}`;
+      return null;
+    };
+
     const extractYearsData = (item) => {
       if (!item) return null;
       const yearsCf = getYearsCustomField(item);
@@ -732,13 +747,15 @@ exports.main = async (event, callback) => {
     // order the same draft line is matched once per period, each time
     // against only the existing lines covering that period.
     // ==================================================
-    const matchExistingItems = (resolutions, pool) => {
+    const matchExistingItems = (resolutions, pool, subjectByChargeId) => {
       const used = new Set();
       const matches = resolutions.map(() => ({ item: null, via: 'none' }));
       const claim = (index, item, via) => {
         used.add(item);
         matches[index] = { item, via };
       };
+      const cohortNotes = [];
+      const ambiguousCohorts = [];
 
       const targetQuantityFor = (draftItem, charge) =>
         (charge && charge.quantity != null) ? charge.quantity : (draftItem.quantity || 0);
@@ -778,6 +795,101 @@ exports.main = async (event, callback) => {
           claim(index, candidates[0], 'chargeId');
         }
       });
+
+      // Pass 1.5 — catalog subject match.
+      //
+      // Subskribe's own catalog carries a stable identity for a charge
+      // across a plan re-version, independent of chargeId, attributes or
+      // quantity: its Charge_Subjects picklist. ORD-V0ZZV09 (Emmaus
+      // College) quoted five charges all sharing "Core + Independent" with
+      // nothing else in common between them — Pass 4 (below) correctly
+      // refused to guess rather than pair them at random, but every one of
+      // the five turned out to be a different school subject (English,
+      // Maths, Languages, Science, Humanities), each with its own
+      // dedicated successor charge. Two charges that would otherwise look
+      // interchangeable (same attributes, same $0 sell price) are told
+      // apart the moment their subjects differ.
+      //
+      // Reached only when a lookup was actually available for this
+      // chargeId — the plan fetch that built subjectByChargeId can fail,
+      // or a charge can simply have no subject set (most zero-quantity
+      // catalog placeholders don't carry one) — and falls back to the
+      // ordinary passes below whenever it doesn't resolve every line in a
+      // subject family. Never widens what a subject match is allowed to
+      // decide: only which draft line is which existing line, same as
+      // every other pass here — the quantity still comes from the matched
+      // existing line, never from here.
+      if (subjectByChargeId && subjectByChargeId.size > 0) {
+        const unmatchedBySubject = new Map();
+        resolutions.forEach(({ item: draftItem, charge }, index) => {
+          if (matches[index].item) return;
+          const quantity = targetQuantityFor(draftItem, charge);
+          if (!quantity) return;
+          const subjectKey = subjectByChargeId.get(draftItem.chargeId);
+          if (!subjectKey) return;
+          if (!unmatchedBySubject.has(subjectKey)) unmatchedBySubject.set(subjectKey, []);
+          unmatchedBySubject.get(subjectKey).push(index);
+        });
+
+        for (const [subjectKey, indexes] of unmatchedBySubject) {
+          const inSubject = (item) => !used.has(item)
+            && item.quantity > 0
+            && subjectByChargeId.get(item.chargeId) === subjectKey;
+
+          // Exact quantity within the subject first — safe on its own,
+          // since every candidate here is already known (by subject) to
+          // belong to no other family, unlike an exact-quantity match run
+          // over the whole pool.
+          indexes.forEach(index => {
+            if (matches[index].item) return;
+            const quantity = targetQuantityFor(resolutions[index].item, resolutions[index].charge);
+            const exact = pool.filter(i => inSubject(i) && i.quantity === quantity);
+            if (exact.length === 1) claim(index, exact[0], 'subject+qty');
+          });
+
+          const remainingIndexes = indexes.filter(index => !matches[index].item);
+          const remainingCandidates = pool.filter(inSubject);
+          if (remainingIndexes.length === 0 || remainingCandidates.length === 0) continue;
+
+          if (remainingIndexes.length !== remainingCandidates.length) {
+            cohortNotes.push(`subject ${subjectKey}: ${remainingIndexes.length} draft line(s) vs ${remainingCandidates.length} existing line(s) — not paired`);
+            continue;
+          }
+
+          // Quantity alone couldn't break the tie — e.g. the one catalog
+          // charge negotiated at two different Year Group price tiers,
+          // now re-versioned onto one successor charge offered twice.
+          // Each draft line's OWN Year Groups is real data here, not a
+          // guess: resolveAll already tied it to a specific CURRENT
+          // subscription charge by exact quantity, and that subscription
+          // charge's Year Groups came straight off the account. Only
+          // committed if it resolves every remaining line to a distinct
+          // candidate — never a partial or best-effort pairing.
+          const byYears = new Map();
+          remainingCandidates.forEach(candidate => {
+            const years = getYearsValue(candidate);
+            if (!byYears.has(years)) byYears.set(years, []);
+            byYears.get(years).push(candidate);
+          });
+          const yearsUsed = new Set();
+          const yearsPairings = [];
+          let resolvedByYears = true;
+          for (const index of remainingIndexes) {
+            const years = getYearsValue(resolutions[index].charge);
+            const candidates = (byYears.get(years) || []).filter(c => !yearsUsed.has(c));
+            if (candidates.length !== 1) { resolvedByYears = false; break; }
+            yearsUsed.add(candidates[0]);
+            yearsPairings.push([index, candidates[0]]);
+          }
+
+          if (resolvedByYears) {
+            yearsPairings.forEach(([index, candidate]) => claim(index, candidate, 'subject+years'));
+            cohortNotes.push(`subject ${subjectKey}: ${remainingIndexes.length} draft line(s) paired to ${remainingCandidates.length} existing line(s) by Year Groups`);
+          } else {
+            cohortNotes.push(`subject ${subjectKey}: ${remainingCandidates.length} candidates differ — not paired`);
+          }
+        }
+      }
 
       // Pass 2 — cross-charge. Only billable lines, only on an exact
       // attribute match, and only when the choice is unambiguous.
@@ -820,8 +932,6 @@ exports.main = async (event, callback) => {
       //
       // If the candidates differ in ANY of those, the choice would matter,
       // so nothing is claimed and the Year Groups guard rail stops the run.
-      const cohortNotes = [];
-      const ambiguousCohorts = [];
       const unmatchedByQuantity = new Map();
       resolutions.forEach(({ item: draftItem, charge }, index) => {
         if (matches[index].item) return;
@@ -986,13 +1096,50 @@ exports.main = async (event, callback) => {
     }
 
     // ==================================================
+    // CATALOG SUBJECT LOOKUP
+    //
+    // One GET /plans/{id} per DISTINCT plan the quote or the draft actually
+    // reference — not one per charge — fetched in parallel and cached by
+    // planId. A plan that fails to fetch, or a charge with no subject and
+    // no itemCode, simply contributes nothing here; matching falls through
+    // to the ordinary passes. See Pass 1.5 in matchExistingItems for why
+    // this exists.
+    // ==================================================
+    const planIds = new Set();
+    existingLineItems.forEach(i => { if (i.planId) planIds.add(i.planId); });
+    draftLineItems.forEach(i => {
+      if (i.planId) planIds.add(i.planId);
+      if (i.replacedPlanId) planIds.add(i.replacedPlanId);
+    });
+
+    const chargeIdToSubjectKey = new Map();
+    const planIdList = [...planIds];
+    const planFetches = await Promise.allSettled(
+      planIdList.map(planId => axios.get(`${API_BASE}/plans/${planId}`, { headers: authHeaders, timeout: READ_TIMEOUT }))
+    );
+    planFetches.forEach((result, index) => {
+      if (result.status !== 'fulfilled') {
+        console.log(`Plan lookup failed for ${planIdList[index]}: ${result.reason && result.reason.message}`);
+        return;
+      }
+      const plan = result.value.data;
+      (plan.charges || []).forEach(charge => {
+        const key = chargeSubjectKey(charge);
+        if (key) chargeIdToSubjectKey.set(charge.id, key);
+      });
+    });
+    if (chargeIdToSubjectKey.size > 0) {
+      console.log(`Catalog subjects resolved for ${chargeIdToSubjectKey.size} charge(s) across ${planIdList.length} plan(s)`);
+    }
+
+    // ==================================================
     // BUILD LINE ITEMS
     // ==================================================
     const { results: draftResolutions, used: usedSubCharges } = resolveAll(draftLineItems);
 
-    const segmentMatchSets = segmentPools.map(pool => matchExistingItems(draftResolutions, pool));
+    const segmentMatchSets = segmentPools.map(pool => matchExistingItems(draftResolutions, pool, chargeIdToSubjectKey));
     const fullSpanMatchSet = isMultiSegment
-      ? matchExistingItems(draftResolutions, fullSpanPool)
+      ? matchExistingItems(draftResolutions, fullSpanPool, chargeIdToSubjectKey)
       : segmentMatchSets[0];
 
     // More interchangeable draft lines than the quote carries at that seat
