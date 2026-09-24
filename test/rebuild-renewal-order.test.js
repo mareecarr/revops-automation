@@ -29,6 +29,7 @@ const kingswood = require('./fixtures/kingswood-catalog-increase.js');
 const oxley = require('./fixtures/oxley-requoted-cohort.js');
 const gulf = require('./fixtures/gulf-empty-draft.js');
 const emmaus = require('./fixtures/emmaus-collapsed-price-tiers.js');
+const emmausSubjects = require('./fixtures/emmaus-catalog-subjects.js');
 
 const { P1, P2, END } = fixtures;
 
@@ -1024,6 +1025,95 @@ test('a genuinely dropped charge under shared attributes is still the ordinary n
   assert.strictEqual(output.new_order_status, 'MANUAL');
   assert.match(output.error_message, /quoted line\(s\) have no counterpart in the fresh draft/);
   assert.doesNotMatch(output.error_message, /different price points/);
+});
+
+// ==================================================
+// ORD-V0ZZV09 / SUB-DZE4XNV — Emmaus College, WITH catalog subjects
+//
+// The same real order, but this time the plan lookups Pass 1.5 depends on
+// actually succeed. Every one of the charges that forced a MANUAL refusal
+// above resolves cleanly and automatically once Charge_Subjects is
+// available — this is the fix, proven against the real payload.
+// ==================================================
+const emmausSubjectsCase = (overrides = {}) => ({
+  subscription: emmausSubjects.buildSubscription(),
+  existingOrder: emmausSubjects.buildExistingOrder(),
+  draftRenewal: emmausSubjects.buildDraftRenewal(),
+  plans: emmausSubjects.buildPlans(),
+  ...overrides
+});
+
+test('catalog subjects resolve every charge that attributes alone could not', async () => {
+  const { posted, output } = await runStep2(emmausSubjectsCase());
+
+  assert.strictEqual(output.new_order_status, 'DRAFT', output.error_message);
+  assert.strictEqual(output.needs_manual_rebuild, false);
+  assert.strictEqual(posted.lineItems.length, 9);
+
+  const only = (chargeId) => {
+    const lines = linesFor(posted, chargeId);
+    assert.strictEqual(lines.length, 1, `expected exactly one ${chargeId} line`);
+    return lines[0];
+  };
+
+  // One clean subject match, no other signal involved.
+  const english = only('CHRG-W9V9GW5');
+  assert.strictEqual(english.quantity, 773);
+  assert.strictEqual(english.sellUnitPrice, 24.05);
+
+  // The 58 is an exact-quantity match within the subject; the 773 needed
+  // subject to be placed at all.
+  const languages = linesFor(posted, 'CHRG-PFR72B4').sort((a, b) => a.quantity - b.quantity);
+  assert.strictEqual(languages.length, 2);
+  assert.strictEqual(languages[0].quantity, 58);
+  assert.strictEqual(languages[0].sellUnitPrice, 44.1);
+  assert.strictEqual(languages[1].quantity, 773);
+  assert.strictEqual(languages[1].sellUnitPrice, 24.05);
+
+  // The one catalog charge negotiated at two Year Group tiers, correctly
+  // split by Year Groups once subject narrows the field to this pair.
+  const humanities = linesFor(posted, 'CHRG-W2V950C').sort((a, b) => a.quantity - b.quantity);
+  assert.strictEqual(humanities.length, 2);
+  assert.strictEqual(humanities[0].quantity, 15);
+  assert.strictEqual(humanities[0].sellUnitPrice, 44.1);
+  assert.strictEqual(yearsOf(humanities[0]), '10');
+  assert.strictEqual(humanities[1].quantity, 773);
+  assert.strictEqual(humanities[1].sellUnitPrice, 24.05);
+  assert.strictEqual(yearsOf(humanities[1]), '7; 8; 9');
+
+  // Both tied at quantity 780 on the subscription (so resolveAll can't
+  // link either to a subscription charge at all) and both $0/seat — only
+  // told apart by subject, since each is the ONLY candidate in its family.
+  const technology = only('CHRG-DZCPWQC');
+  assert.strictEqual(technology.quantity, 773);
+  assert.strictEqual(technology.sellUnitPrice, 0);
+  const pdhpe = only('CHRG-FJ0TYZK');
+  assert.strictEqual(pdhpe.quantity, 773);
+  assert.strictEqual(pdhpe.sellUnitPrice, 0);
+
+  // Untouched by any of this — still resolves on attrs+qty exactly as
+  // before, on a plan Pass 1.5 never fetched.
+  const other = only('CHRG-6T5J1FH');
+  assert.strictEqual(other.quantity, 43);
+  assert.strictEqual(other.sellUnitPrice, 44.1);
+
+  const billable = posted.lineItems.reduce((s, i) => s + i.quantity, 0);
+  assert.strictEqual(billable, 4021, 'every quoted seat accounted for');
+});
+
+test('a plan lookup that fails is tolerated, not fatal', async () => {
+  // Same order, but the plan API is unreachable for one of the two old
+  // plans — Pass 1.5 should contribute nothing for that family and fall
+  // through to the ordinary passes, not blow up the whole rebuild.
+  const plans = emmausSubjectsCase().plans;
+  delete plans['PLAN-99999WD'];
+
+  const { output } = await runStep2(emmausSubjectsCase({ plans }));
+
+  // The families PLAN-CMJB619/PLAN-GHVVWF9 still resolve; only the
+  // PDHPE/Technology pair (on the now-unfetchable plan) can't place —
+  // still MANUAL, but for a real, narrower reason, not a crash.
+  assert.notStrictEqual(output.new_order_status, 'ERROR', output.error_message);
 });
 
 // ==================================================

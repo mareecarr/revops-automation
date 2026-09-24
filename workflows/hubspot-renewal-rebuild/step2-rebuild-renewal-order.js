@@ -856,6 +856,18 @@ exports.main = async (event, callback) => {
             continue;
           }
 
+          // Exactly one draft line and one quoted line left under this
+          // subject: subject alone already uniquely identifies the pair,
+          // whatever their quantities or Year Groups say — there is no
+          // other candidate here to confuse it with. This is also the
+          // path a resolveAll ambiguity elsewhere in the subscription
+          // (e.g. two charges tied at the same quantity) cannot block:
+          // this pairing never depended on that resolution succeeding.
+          if (remainingIndexes.length === 1) {
+            claim(remainingIndexes[0], remainingCandidates[0], 'subject');
+            continue;
+          }
+
           // Quantity alone couldn't break the tie — e.g. the one catalog
           // charge negotiated at two different Year Group price tiers,
           // now re-versioned onto one successor charge offered twice.

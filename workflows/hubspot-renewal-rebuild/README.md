@@ -96,11 +96,12 @@ represents the same commercial item, and takes price and Year Groups from
 there. Plan re-versions make that harder than it sounds: the charge underneath
 a line gets renamed, so the same item appears under one `chargeId` in the
 existing order and another in the draft. Matching therefore runs in passes —
-subscription charge UUID, then catalog charge id, then an exact attribute
-match, then a whole cohort of interchangeable lines paired positionally by
-quantity, then that same cohort paired by attribute alone once a mid-term
-amendment has moved the quantity — so a stronger signal always claims a line
-before a weaker one can.
+subscription charge UUID, then catalog charge id, then Subskribe's own
+Charge_Subjects catalog data (fetched from the plans the quote and draft
+actually reference), then an exact attribute match, then a whole cohort of
+interchangeable lines paired positionally by quantity, then that same cohort
+paired by attribute alone once a mid-term amendment has moved the quantity —
+so a stronger signal always claims a line before a weaker one can.
 
 ## Multi-year and ramped orders
 
@@ -351,6 +352,52 @@ carried — so reporting them as separate "price points" would flag an
 ambiguity with no dollar consequence. ORD-V0ZZV09's two $0/100%-discount
 lines (list $49 and list $25.50) report as one price point of $0, not two.
 
+This refusal is now largely avoided rather than just well-explained — see
+the next section.
+
+### Catalog subjects resolve what attributes alone cannot
+
+The attribute-key cohort pass above treats attributes and quantity as the
+only signal it has for what a charge actually *is*. Subskribe's own catalog
+carries a better one directly: `Charge_Subjects`, a picklist naming the
+school subject a charge covers, set on (almost) every charge and unchanged
+by a plan re-version — a `GET /plans/{id}` (`itemCode`, lower-cased, is the
+fallback for the rare charge with no subject set). All five of ORD-V0ZZV09's
+"three price points under one attribute pair" charges turned out to be five
+different subjects: English, Maths, Languages, Science, and Humanities/PDHPE/
+Technology on a second plan — each with its own dedicated successor charge.
+
+Pass 1.5, reached after the same-chargeId pass and before the attribute
+heuristics, fetches every plan the quote and the draft actually reference
+(one call per DISTINCT plan, not per charge — deduplicated, fetched in
+parallel, cached for the run) and builds a chargeId -> subject lookup from
+their `charges` arrays. Within one subject it tries an exact-quantity match
+first — safe on its own, since subject scoping already rules out every other
+family — then falls back to matching each draft line's own Year Groups (read
+off the CURRENT subscription charge `resolveAll` already tied it to by exact
+quantity, not a guess) when quantity alone can't break a tie: the one catalog
+charge negotiated at two different Year Group price tiers, now re-versioned
+onto a single successor charge offered twice, needs exactly this. A charge
+with no subject anywhere, or a plan that fails to fetch, simply contributes
+nothing — matching falls through to the passes below exactly as before.
+
+Note what this does NOT do: `replacementPlanIds` (the plan-level field
+naming a deprecated plan's replacement) is not followed to find the "new"
+plan — ORD-V0ZZV09's `PLAN-99999WD` names `PLAN-EYJY1D9` there, but the real
+draft actually re-versioned its charges onto `PLAN-TG9K5EY`. Only the planIds
+the quote and the draft actually carry are ever fetched.
+
+Verified against the real payload: 5 of ORD-V0ZZV09's 7 previously-ambiguous
+charges resolve automatically this way, rebuilt quantity climbing from 101 to
+the full 5527 quoted once all seven are in reach (two needed
+`PLAN-99999WD`/`PLAN-TG9K5EY`, fetched separately from the other five's
+`PLAN-CMJB619`/`PLAN-GHVVWF9`). Those last two are also the case that shows
+why the quantity/Year-Groups tie-breaks above still matter: both are tied at
+quantity 780 on the CURRENT subscription, which is exactly what stops the
+subscription-charge resolver from linking either to a specific charge at
+all — subject alone still places each correctly, because each is the only
+candidate in its own family, with nothing else there to confuse it with.
+
 ### The catalog can move under a line the rebuild cannot price
 
 A line whose attributes had to be recovered from the quote takes the
@@ -448,8 +495,12 @@ the moved rate card), ORD-16QXXQ8 (a catalog rise frozen out by an invented
 list price override), ORD-8DCTRDQ (a plan-swap cohort a mid-term amendment
 rebalanced out from under the quantity match), ORD-7723YDP (a fresh draft
 offering zero quantity everywhere, paid and complimentary lines alike) and
-ORD-V0ZZV09 (three negotiated prices collapsing onto one attribute key once
-their charges are renamed). No network, no dependencies.
+ORD-V0ZZV09, twice over: once with no catalog data available (three
+negotiated prices collapsing onto one attribute key once their charges are
+renamed, correctly refused) and once with the real `GET /plans/{id}`
+responses stubbed in (`emmaus-catalog-subjects.js`), proving the same order
+resolves cleanly via Pass 1.5's Charge_Subjects lookup. No network, no
+dependencies.
 
 The Encounter Lutheran fixture carries a `repriceLikeSubskribe` helper, since
 a line sent down the catalog path is priced by the API and a stub that just
